@@ -1,0 +1,242 @@
+"""Unit & Integration Tests for LullabAI Twins System 1 Edge Detector (Infant vs. Adult AI)."""
+
+from __future__ import annotations
+
+from pathlib import Path
+import sys
+
+import numpy as np
+
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT / "edge" / "detector" / "src"))
+sys.path.insert(0, str(ROOT / "edge" / "mock-camera"))
+
+from audio_cry import AudioCryDetector  # noqa: E402
+from breathing_band import BreathingBandTracker  # noqa: E402
+from cv_compat import cv2  # noqa: E402
+from mock_streamer import MockCameraState  # noqa: E402
+from motion import MotionDetector  # noqa: E402
+
+
+SAMPLE_IMAGE = ROOT / "edge" / "assets" / "sample_baby_band.jpg"
+SAMPLE_DOG_PEN = ROOT / "edge" / "assets" / "sample_dog_pen.jpg"
+SAMPLE_DOG_HELD_TP260 = ROOT / "edge" / "assets" / "sample_dog_held_tp260.jpg"
+SAMPLE_TP260_PLAYPEN_DOG1 = ROOT / "edge" / "assets" / "sample_tp260_playpen_dog1.jpg"
+SAMPLE_TP260_PLAYPEN_DOG2 = ROOT / "edge" / "assets" / "sample_tp260_playpen_dog2.jpg"
+SAMPLE_TP260_PLAYPEN_EMPTY = ROOT / "edge" / "assets" / "sample_tp260_playpen_empty.jpg"
+
+
+def test_detect_pomeranian_dog_in_playpen_and_reject_empty_playpen() -> None:
+    """Verifies that the Pomeranian dog inside the playpen is detected as PET, and empty playpen returns NONE."""
+    assert SAMPLE_DOG_PEN.exists(), f"Missing dog sample image at {SAMPLE_DOG_PEN}"
+    dog_img = cv2.imread(str(SAMPLE_DOG_PEN))
+    assert dog_img is not None
+
+    tracker = BreathingBandTracker()
+    res = tracker.process_frame(dog_img, timestamp=500.0)
+    assert res.subject_type == "PET"
+    assert res.band_detected is True
+    assert res.band_bbox is not None
+    bx, by, bw, bh = res.band_bbox
+    assert bw >= 45 and bh >= 45
+
+    # Now erase the dog from the playpen floor (leaving fence slats, curtain, bed, water bowl, and toys)
+    empty_pen = dog_img.copy()
+    h, w = empty_pen.shape[:2]
+    empty_pen[int(h * 0.28) : int(h * 0.65), int(w * 0.22) : int(w * 0.62)] = (195, 205, 212)
+
+    tracker_empty = BreathingBandTracker()
+    res_empty = tracker_empty.process_frame(empty_pen, timestamp=505.0)
+    assert res_empty.subject_type == "NONE"
+    assert res_empty.band_detected is False
+    assert res_empty.band_bbox is None
+
+
+def test_detect_pomeranian_held_in_front_of_tp260_camera() -> None:
+    """Verifies that holding the Pomeranian in front of the live TP260 camera detects PET at both native and 1280x720."""
+    assert SAMPLE_DOG_HELD_TP260.exists(), f"Missing TP260 held dog sample at {SAMPLE_DOG_HELD_TP260}"
+    tp_img = cv2.imread(str(SAMPLE_DOG_HELD_TP260))
+    assert tp_img is not None
+
+    for frame in (tp_img, cv2.resize(tp_img, (1280, 720))):
+        tracker = BreathingBandTracker()
+        res = tracker.process_frame(frame, timestamp=600.0)
+        assert res.subject_type == "PET"
+        assert res.band_detected is True
+        assert res.band_bbox is not None
+
+    # Erase the dog with the wearer's shirt color so only the adult + room/window remain
+    tp_adult_only = tp_img.copy()
+    tp_adult_only[80:188, 45:162] = (101, 85, 150)
+
+    for frame in (tp_adult_only, cv2.resize(tp_adult_only, (1280, 720))):
+        tracker_adult = BreathingBandTracker()
+        res_adult = tracker_adult.process_frame(frame, timestamp=605.0)
+        assert res_adult.subject_type == "ADULT"
+        assert res_adult.band_detected is False
+
+
+def test_tp260_live_playpen_views_with_and_without_dog_at_hd() -> None:
+    """Verifies the 3 live TP260 playpen views (2 with dog in top-right/right, 1 empty playpen) at 1280x720."""
+    for dog_path in (SAMPLE_TP260_PLAYPEN_DOG1, SAMPLE_TP260_PLAYPEN_DOG2):
+        img = cv2.imread(str(dog_path))
+        assert img is not None
+        hd = cv2.resize(img, (1280, 720))
+        res = BreathingBandTracker().process_frame(hd, timestamp=700.0)
+        assert res.subject_type == "PET"
+        assert res.band_detected is True
+        assert res.band_bbox is not None
+
+    empty_img = cv2.imread(str(SAMPLE_TP260_PLAYPEN_EMPTY))
+    assert empty_img is not None
+    empty_hd = cv2.resize(empty_img, (1280, 720))
+    res_empty = BreathingBandTracker().process_frame(empty_hd, timestamp=710.0)
+    assert res_empty.subject_type == "NONE"
+    assert res_empty.band_detected is False
+    assert res_empty.band_bbox is None
+
+
+def test_pet_box_follows_consecutive_frames_and_clears_when_dog_leaves() -> None:
+    tracker = BreathingBandTracker()
+    dog_top, dog_right, empty = (
+        cv2.imread(str(path))
+        for path in (SAMPLE_TP260_PLAYPEN_DOG1, SAMPLE_TP260_PLAYPEN_DOG2, SAMPLE_TP260_PLAYPEN_EMPTY)
+    )
+    frames = [cv2.resize(frame, (1280, 720)) for frame in (empty, dog_top, dog_right, empty)]
+    empty_first, first, second, empty_last = [tracker.process_frame(frame) for frame in frames]
+
+    assert empty_first.subject_type == empty_last.subject_type == "NONE"
+    assert empty_last.band_bbox is None
+    assert first.subject_type == second.subject_type == "PET"
+    assert first.band_bbox is not None and second.band_bbox is not None
+    assert first.band_bbox[0] + first.band_bbox[2] >= 1280 * 0.90
+    assert second.band_bbox[1] > first.band_bbox[1] + 100
+
+
+def test_detect_infant_on_uploaded_sample_image() -> None:
+    """Verifies that BreathingBandTracker classifies the infant photo as BABY without RPM."""
+    assert SAMPLE_IMAGE.exists(), f"Missing sample image at {SAMPLE_IMAGE}"
+    img = cv2.imread(str(SAMPLE_IMAGE))
+    assert img is not None
+
+    tracker = BreathingBandTracker()
+    res = tracker.process_frame(img, timestamp=1000.0)
+
+    assert res.subject_type == "BABY"
+    assert res.band_detected is True
+    assert res.breathing_rpm is None
+    assert res.band_confidence >= 0.70
+    assert res.band_bbox is not None
+
+
+def test_markerless_infant_detection_without_band() -> None:
+    """Verifies that an infant wearing plain clothes (no band) is classified as BABY."""
+    cam = MockCameraState(SAMPLE_IMAGE)
+    h, w = cam.base_frame.shape[:2]
+    x1, x2 = int(w * 0.33), int(w * 0.61)
+    y1, y2 = int(h * 0.54), int(h * 0.83)
+    yy, xx = np.indices((y2 - y1, x2 - x1), dtype=np.float32)
+    fabric = 230.0 + 14.0 * np.sin(yy / 6.0) + 8.0 * np.cos(xx / 9.0)
+    cam.base_frame[y1:y2, x1:x2, 0] = np.clip(fabric, 180, 250).astype(np.uint8)
+    cam.base_frame[y1:y2, x1:x2, 1] = np.clip(fabric + 4.0, 180, 250).astype(np.uint8)
+    cam.base_frame[y1:y2, x1:x2, 2] = np.clip(fabric + 8.0, 180, 250).astype(np.uint8)
+
+    tracker = BreathingBandTracker()
+    res = tracker.process_frame(cam.render_frame(now=0.0), timestamp=0.0)
+
+    assert res.subject_type == "BABY"
+    assert res.band_detected is True
+    assert res.breathing_rpm is None
+
+
+def test_adult_in_front_of_camera_is_classified_as_adult_not_baby() -> None:
+    """Verifies that an adult (head + wide shoulders anchored to bottom frame) is classified as ADULT."""
+    h, w = 720, 960
+    # Neutral room wall background
+    frame = np.full((h, w, 3), (210, 215, 220), dtype=np.uint8)
+
+    # Draw realistic adult silhouette in front of camera:
+    # Adult head with realistic warm skin tone (BGR: B=110, G=145, R=195)
+    frame[150:330, 405:555] = (110, 145, 195)
+    # Add symmetric adult eyes, eyebrows, nasal bridge, and mouth horizontal edges
+    frame[195:210, 425:465] = (40, 45, 60)   # Left eye/brow
+    frame[195:210, 495:535] = (40, 45, 60)   # Right eye/brow
+    frame[210:270, 472:488] = (75, 105, 150) # Nasal bridge
+    frame[285:300, 450:510] = (65, 80, 130)  # Mouth/jaw
+    # Adult broad shoulders & upper torso extending to bottom of frame (width ~460px, y: 335..710, x: 250..710)
+    frame[335:710, 250:710] = (50, 65, 90)
+
+    tracker = BreathingBandTracker()
+    res = tracker.process_frame(frame, timestamp=10.0)
+
+    assert res.subject_type == "ADULT"
+    assert res.band_detected is False
+    assert res.breathing_rpm is None
+    assert res.band_bbox is not None
+
+
+def test_empty_crib_and_furnished_room_are_classified_as_none() -> None:
+    """Verifies that both a blank crib and an empty room with furniture/curtains/pillows return NONE."""
+    tracker = BreathingBandTracker()
+
+    # 1. Uniform empty crib
+    blank_frame = np.full((720, 960, 3), (200, 205, 210), dtype=np.uint8)
+    res_blank = tracker.process_frame(blank_frame, timestamp=20.0)
+    assert res_blank.subject_type == "NONE"
+    assert res_blank.band_detected is False
+    assert res_blank.band_bbox is None
+
+    # 2. Empty room with textured walls, window curtain, wooden cabinet, and bed pillow (no person)
+    room = np.full((720, 960, 3), (185, 190, 195), dtype=np.uint8)
+    # Curtain stripes on left
+    for x in range(100, 320, 24):
+        room[80:550, x : x + 12] = (120, 130, 140)
+    # Dark cabinet on right
+    room[220:680, 620:860] = (55, 65, 75)
+    # White pillow in center
+    room[420:580, 340:580] = (235, 240, 242)
+
+    tracker2 = BreathingBandTracker()
+    res_room = tracker2.process_frame(room, timestamp=25.0)
+    assert res_room.subject_type == "NONE"
+    assert res_room.band_detected is False
+    assert res_room.band_bbox is None
+
+
+def test_audio_cry_and_pet_mode_detector() -> None:
+    """Verifies that normal room noise is ignored and CRY mode audio triggers detection."""
+    cam = MockCameraState(SAMPLE_IMAGE)
+    detector = AudioCryDetector(subject_mode="PET_TEST", cry_threshold=0.55)
+
+    cam.set_mode("NORMAL")
+    quiet_samples = cam.generate_audio_samples(duration_sec=1.5)
+    quiet_res = detector.analyze_waveform(quiet_samples)
+    assert quiet_res.cry_triggered is False
+    assert quiet_res.cry_prob < 0.3
+
+    cam.set_mode("CRY")
+    cry_samples = cam.generate_audio_samples(duration_sec=1.5)
+    cry_res = detector.analyze_waveform(cry_samples)
+    assert cry_res.cry_triggered is True
+    assert cry_res.cry_prob >= 0.55
+
+
+def test_motion_detector_roi() -> None:
+    """Verifies that calm breathing does not trigger full-body motion alert, while MOTION mode does."""
+    cam = MockCameraState(SAMPLE_IMAGE)
+    motion_det = MotionDetector(motion_threshold=4.0, sustain_frames=2)
+
+    cam.set_mode("NORMAL", rpm=32.0)
+    for i in range(5):
+        cam.start_time = -float(i) * 0.1
+        res = motion_det.process_frame(cam.render_frame())
+    assert res.motion_triggered is False
+
+    cam.set_mode("MOTION")
+    triggered_any = False
+    for i in range(8):
+        cam.start_time = -float(i) * 0.15
+        res = motion_det.process_frame(cam.render_frame())
+        if res.motion_triggered:
+            triggered_any = True
+    assert triggered_any is True

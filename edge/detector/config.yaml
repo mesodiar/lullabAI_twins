@@ -1,0 +1,56 @@
+# LullabAI Twins — Edge Node (System 1) Configuration
+
+global:
+  # Set to "BABY" for infant monitoring (no breathing band required!),
+  # or "PET_TEST" when testing with a pet.
+  subject_mode: "BABY"
+
+  # Send a high-resolution snapshot every 5 minutes (300s) even when sleeping peacefully
+  # so System 2 can verify safe sleep posture & update sleep duration continuously.
+  periodic_snapshot_interval_sec: 300
+
+  # Cooldown (seconds) between repeated alerts of the same category
+  cooldowns:
+    CRY: 30
+    BAND_ROLLOVER: 25
+    BREATHING_ANOMALY: 25
+    MOTION: 60
+
+  # Frame processing rate (Hz) per camera stream
+  target_fps: 12
+  pre_roll_seconds: 4.0
+  post_roll_seconds: 3.0
+
+babies:
+  - baby_id: "baby_1"
+    name: "แฝด A (TP260 Camera)"
+    enabled: true
+    camera_id: "cam_crib_1"
+    # Pulls through go2rtc RTSP relay (or HTTP snapshot fallback for mock-camera)
+    video_source_url: "rtsp://go2rtc:8554/baby_1_sub"
+    snapshot_url: "http://go2rtc:1984/api/frame.jpeg?src=baby_1_sub"
+    rtsp_audio_url: "rtsp://go2rtc:8554/baby_1_sub"
+    audio_wav_url: "http://mock-camera:8090/audio.wav"
+    # Normalized Crib ROI: [x_min, y_min, x_max, y_max]
+    crib_roi: [0.05, 0.05, 0.95, 0.95]
+    thresholds:
+      cry_prob: 0.55
+      motion_score: 4.5
+      band_min_markers: 8
+      apnea_low_rpm: 8.0
+
+  # Uncomment or set enabled: true when the 2nd camera for Twin B is installed
+  - baby_id: "baby_2"
+    name: "แฝด B"
+    enabled: false
+    camera_id: "cam_crib_2"
+    video_source_url: "http://go2rtc:1984/api/stream.mjpeg?src=baby_2_sub"
+    snapshot_url: "http://go2rtc:1984/api/frame.jpeg?src=baby_2_sub"
+    rtsp_audio_url: "rtsp://go2rtc:8554/baby_2_sub"
+    audio_wav_url: "http://mock-camera:8090/audio.wav?baby=baby_2"
+    crib_roi: [0.05, 0.05, 0.95, 0.95]
+    thresholds:
+      cry_prob: 0.55
+      motion_score: 4.5
+      band_min_markers: 8
+      apnea_low_rpm: 8.0

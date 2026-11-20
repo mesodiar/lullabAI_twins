@@ -1,0 +1,38 @@
+{
+  "event_id": "evt_1795138578_90c79e",
+  "baby_id": "baby_1",
+  "camera_id": "cam_crib_1",
+  "subject_mode": "BABY",
+  "trigger_type": "MOTION",
+  "status": "PENDING_AI",
+  "created_at": "2026-11-20T01:36:18.514455+00:00",
+  "analyzed_at": null,
+  "edge_metrics": {
+    "yamnet_cry_prob": 0.001,
+    "yamnet_top_label": "Silence",
+    "motion_score": 10.21,
+    "band_detected": true,
+    "band_confidence": 0.89,
+    "breathing_rpm": null,
+    "band_bbox": [
+      296,
+      444,
+      547,
+      276
+    ],
+    "band_bbox_pct": [
+      23.12,
+      61.67,
+      42.73,
+      38.33
+    ],
+    "subject_type": "PET"
+  },
+  "media": {
+    "gcs_video_uri": null,
+    "gcs_snapshot_uri": null,
+    "signed_video_url": null,
+    "signed_snapshot_url": null
+  },
+  "ai_analysis": null
+}

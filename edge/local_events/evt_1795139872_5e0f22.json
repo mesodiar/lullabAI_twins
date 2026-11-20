@@ -1,0 +1,38 @@
+{
+  "event_id": "evt_1795139872_5e0f22",
+  "baby_id": "baby_1",
+  "camera_id": "cam_crib_1",
+  "subject_mode": "BABY",
+  "trigger_type": "CRY",
+  "status": "PENDING_AI",
+  "created_at": "2026-11-20T01:57:52.010311+00:00",
+  "analyzed_at": null,
+  "edge_metrics": {
+    "yamnet_cry_prob": 0.844,
+    "yamnet_top_label": "Baby cry, infant cry",
+    "motion_score": 11.86,
+    "band_detected": true,
+    "band_confidence": 0.94,
+    "breathing_rpm": null,
+    "band_bbox": [
+      747,
+      77,
+      530,
+      492
+    ],
+    "band_bbox_pct": [
+      58.36,
+      10.69,
+      41.41,
+      68.33
+    ],
+    "subject_type": "PET"
+  },
+  "media": {
+    "gcs_video_uri": null,
+    "gcs_snapshot_uri": null,
+    "signed_video_url": null,
+    "signed_snapshot_url": null
+  },
+  "ai_analysis": null
+}

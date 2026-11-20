@@ -1,0 +1,56 @@
+# go2rtc configuration for LullabAI Twins (Edge Node)
+# Docs: https://github.com/AlexxIT/go2rtc
+
+streams:
+  # ===========================================================================
+  # Baby 1 (Active by default — switches between Mock Stream and Real 4K RTSP)
+  # ===========================================================================
+  baby_1_main:
+    # Pulls from BABY_1_MAIN_RTSP in edge/.env (e.g. rtsp://user:pass@192.168.1.x:554/stream1)
+    # Includes ffmpeg source so Tapo Digest Auth + PCMA/AAC audio -> WebRTC Opus work seamlessly
+    - "${BABY_1_MAIN_RTSP}"
+    - "ffmpeg:${BABY_1_MAIN_RTSP}#video=copy#audio=opus"
+
+  baby_1_sub:
+    # Low-resolution (360p) + audio stream used by Python System 1 Detector
+    # Pulls from BABY_1_SUB_RTSP in edge/.env (e.g. rtsp://user:pass@192.168.1.x:554/stream2)
+    - "${BABY_1_SUB_RTSP}"
+    - "ffmpeg:${BABY_1_SUB_RTSP}#video=copy#audio=copy"
+
+  # ===========================================================================
+  # Baby 2 (Twin #2 — Ready to enable when 2nd camera is installed)
+  # ===========================================================================
+  baby_2_main:
+    - "${BABY_2_MAIN_RTSP}"
+
+  baby_2_sub:
+    - "${BABY_2_SUB_RTSP}"
+
+api:
+  listen: ":1984"
+  origin: "*" # Allows Parent's Mobile PWA via Cloudflare Tunnel to connect via WebSocket/WebRTC
+
+rtsp:
+  listen: ":8554"
+  default_query: "mp4"
+
+webrtc:
+  listen: ":8555"
+  # Expose localhost:8555 + stun so Docker containers on PC/Mac can establish WebRTC ICE immediately
+  candidates:
+    - "localhost:8555"
+    - "stun:8555"
+  # Combine Cloudflare STUN + Google STUN + optional Cloudflare Calls TURN server
+  # so WebRTC works both on Home Wi-Fi LAN and remotely over 4G/5G
+  ice_servers:
+    - urls:
+        - "stun:stun.cloudflare.com:3478"
+        - "stun:stun.l.google.com:19302"
+    # Uncomment and set TURN credentials (e.g., Cloudflare Calls TURN) for strict 4G/5G NATs:
+    # - urls:
+    #     - "turn:turn.cloudflare.com:3478?transport=udp"
+    #     - "turn:turn.cloudflare.com:3478?transport=tcp"
+    #     - "turns:turn.cloudflare.com:5349?transport=tcp"
+    #   username: "${TURN_USERNAME}"
+    #   credential: "${TURN_PASSWORD}"
+

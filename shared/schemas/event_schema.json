@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LullabAIEvent",
+  "description": "Shared event and baby state schema between Edge (System 1), Cloud Run + Vertex AI (System 2), and Parent PWA.",
+  "type": "object",
+  "required": [
+    "event_id",
+    "baby_id",
+    "camera_id",
+    "subject_mode",
+    "trigger_type",
+    "status",
+    "created_at",
+    "edge_metrics"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "description": "Unique event UUID, also used as FCM notification tag for 2-stage alert replacement."
+    },
+    "baby_id": {
+      "type": "string",
+      "examples": ["baby_1", "baby_2"]
+    },
+    "camera_id": {
+      "type": "string",
+      "examples": ["cam_crib_1", "cam_crib_2"]
+    },
+    "subject_mode": {
+      "type": "string",
+      "enum": ["BABY", "PET_TEST"],
+      "description": "Whether the monitored subject is a baby or a pet (dog) wearing the breathing band for testing."
+    },
+    "trigger_type": {
+      "type": "string",
+      "enum": [
+        "CRY",
+        "MOTION",
+        "BREATHING_ANOMALY",
+        "BAND_ROLLOVER",
+        "PERIODIC_CHECK"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": ["PENDING_AI", "ANALYZED", "FALSE_ALARM_SUPPRESSED"]
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "analyzed_at": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "edge_metrics": {
+      "type": "object",
+      "required": [
+        "yamnet_cry_prob",
+        "motion_score",
+        "band_detected",
+        "breathing_rpm"
+      ],
+      "properties": {
+        "yamnet_cry_prob": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "yamnet_top_label": {
+          "type": "string"
+        },
+        "motion_score": {
+          "type": "number",
+          "minimum": 0.0
+        },
+        "band_detected": {
+          "type": "boolean",
+          "description": "Whether the high-contrast Nanit-style geometric breathing band pattern is visible."
+        },
+        "band_confidence": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "breathing_rpm": {
+          "type": ["number", "null"],
+          "description": "Estimated respiration rate (breaths per minute) derived from sub-pixel optical flow on the breathing band."
+        },
+        "band_bbox": {
+          "type": ["array", "null"],
+          "items": { "type": "integer" },
+          "minItems": 4,
+          "maxItems": 4,
+          "description": "[x, y, width, height] of the detected breathing band."
+        }
+      }
+    },
+    "media": {
+      "type": "object",
+      "properties": {
+        "gcs_video_uri": { "type": ["string", "null"] },
+        "gcs_snapshot_uri": { "type": ["string", "null"] },
+        "signed_video_url": { "type": ["string", "null"] },
+        "signed_snapshot_url": { "type": ["string", "null"] }
+      }
+    },
+    "ai_analysis": {
+      "type": ["object", "null"],
+      "properties": {
+        "is_false_alarm": { "type": "boolean" },
+        "safety_alert": { "type": "boolean" },
+        "posture": {
+          "type": "string",
+          "enum": ["SUPINE", "PRONE", "SIDE", "SITTING_OR_STANDING", "UNKNOWN"]
+        },
+        "face_covered": { "type": "boolean" },
+        "band_visible_and_secure": { "type": "boolean" },
+        "sleep_state": {
+          "type": "string",
+          "enum": [
+            "ASLEEP_DEEP",
+            "ASLEEP_LIGHT",
+            "DROWSY",
+            "AWAKE_CALM",
+            "AWAKE_FUSSY",
+            "CRYING",
+            "OUT_OF_CRIB"
+          ]
+        },
+        "urgency": {
+          "type": "string",
+          "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+        },
+        "title_th": { "type": "string" },
+        "reason_hypothesis_th": { "type": "string" },
+        "recommended_action_th": { "type": "string" }
+      }
+    }
+  }
+}
+

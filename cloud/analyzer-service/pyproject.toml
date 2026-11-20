@@ -1,0 +1,19 @@
+[project]
+name = "lullabai-cloud-analyzer"
+version = "0.1.0"
+description = "LullabAI Twins System 2 Analyzer Service (Cloud Run + Vertex AI Gemini + Firestore + FCM)"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.30.0",
+    "pydantic>=2.7.0",
+    "google-genai>=1.0.0",
+    "google-cloud-firestore>=2.16.0",
+    "firebase-admin>=6.5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+

@@ -1,0 +1,19 @@
+[project]
+name = "lullabai-edge-detector"
+version = "0.1.0"
+description = "LullabAI Twins System 1 Edge Detector (Breathing Band Optical Flow + Motion + YAMNet Cry)"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26.0",
+    "opencv-python-headless>=4.9.0",
+    "PyYAML>=6.0.1",
+    "google-cloud-storage>=2.16.0",
+    "google-cloud-firestore>=2.16.0",
+    "firebase-admin>=6.5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+

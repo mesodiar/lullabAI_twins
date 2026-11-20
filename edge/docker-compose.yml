@@ -1,0 +1,71 @@
+services:
+  # 1. Mock Camera Server (Streams the sample baby breathing-band image + simulated chest breathing & cry audio)
+  #    Disable or remove once your real 4K RTSP IP camera is connected.
+  mock-camera:
+    build:
+      context: .
+      dockerfile: mock-camera/Dockerfile
+    container_name: lullabai-mock-camera
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+
+  # 2. go2rtc (Local RTSP Hub + Sub-second WebRTC & MSE Streaming Server)
+  go2rtc:
+    image: alexxit/go2rtc:latest
+    container_name: lullabai-go2rtc
+    restart: unless-stopped
+    ports:
+      - "1984:1984"       # WebRTC Signaling API & MSE WebSocket
+      - "8554:8554"       # Local RTSP Relay
+      - "8555:8555/tcp"   # WebRTC Media TCP
+      - "8555:8555/udp"   # WebRTC Media UDP
+    environment:
+      - BABY_1_MAIN_RTSP=${BABY_1_MAIN_RTSP:-http://mock-camera:8090/stream.mjpeg}
+      - BABY_1_SUB_RTSP=${BABY_1_SUB_RTSP:-http://mock-camera:8090/stream.mjpeg}
+      - BABY_2_MAIN_RTSP=${BABY_2_MAIN_RTSP:-http://mock-camera:8090/stream.mjpeg?baby=baby_2}
+      - BABY_2_SUB_RTSP=${BABY_2_SUB_RTSP:-http://mock-camera:8090/stream.mjpeg?baby=baby_2}
+      - TURN_USERNAME=${TURN_USERNAME:-}
+      - TURN_PASSWORD=${TURN_PASSWORD:-}
+    volumes:
+      - ./go2rtc/go2rtc.yaml:/config/go2rtc.yaml:ro
+    depends_on:
+      - mock-camera
+
+  # 3. System 1 Edge Detector (Breathing Band Optical Flow + Motion + YAMNet Cry + Fast-Path Alert)
+  edge-detector:
+    build:
+      context: .
+      dockerfile: detector/Dockerfile
+    container_name: lullabai-edge-detector
+    restart: unless-stopped
+    ports:
+      - "8095:8095"
+    environment:
+      - BABY_1_MAIN_RTSP=${BABY_1_MAIN_RTSP:-}
+      - BABY_1_SUB_RTSP=${BABY_1_SUB_RTSP:-}
+      - GCP_PROJECT_ID=${GCP_PROJECT_ID:-}
+      - GCS_EVENTS_BUCKET=${GCS_EVENTS_BUCKET:-}
+      - GOOGLE_APPLICATION_CREDENTIALS=/secrets/gcp-service-account.json
+      - DRY_RUN=${DRY_RUN:-false}
+      - LOCAL_ANALYZER_URL=${LOCAL_ANALYZER_URL:-}
+      - SUBJECT_MODE=${SUBJECT_MODE:-PET_TEST}
+    volumes:
+      - ./detector/config.yaml:/app/config.yaml:ro
+      - ./detector/src:/app/src:ro
+      - ./local_events:/app/local_events
+    depends_on:
+      - go2rtc
+      - mock-camera
+
+  # 4. Cloudflare Tunnel (Exposes go2rtc HTTPS/WSS to Parent's Mobile PWA outside home LAN)
+  #    Activated when CLOUDFLARE_TUNNEL_TOKEN is provided in .env
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: lullabai-cloudflared
+    restart: unless-stopped
+    profiles: ["remote-tunnel"]
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on:
+      - go2rtc
+
