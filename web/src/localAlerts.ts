@@ -1,11 +1,11 @@
 import type { LullabAIEvent, TriggerType } from "./lib/types";
 
 const TITLES: Record<TriggerType, string> = {
-  CRY: "ตรวจพบเสียงคล้ายเสียงร้อง",
-  MOTION: "ขยับตัวแรง",
-  BREATHING_ANOMALY: "ตรวจพบจังหวะหายใจผิดปกติ",
-  BAND_ROLLOVER: "สงสัยว่าพลิกคว่ำหรือหน้าถูกบัง",
-  PERIODIC_CHECK: "ตรวจตามรอบ",
+  CRY: "Possible crying detected",
+  MOTION: "Strong movement detected",
+  BREATHING_ANOMALY: "Possible irregular breathing",
+  BAND_ROLLOVER: "Possible rollover or covered face",
+  PERIODIC_CHECK: "Periodic check",
 };
 
 export function isPetCoverAlert(event: LullabAIEvent) {
@@ -13,7 +13,7 @@ export function isPetCoverAlert(event: LullabAIEvent) {
 }
 
 export function alertTitle(event: LullabAIEvent) {
-  return isPetCoverAlert(event) ? "สงสัยว่าผ้าปิดหน้าน้องหมา" : TITLES[event.trigger_type];
+  return isPetCoverAlert(event) ? "Possible blanket over dog's face" : TITLES[event.trigger_type];
 }
 
 export function isImportantAlert(event: LullabAIEvent) {
@@ -23,10 +23,10 @@ export function isImportantAlert(event: LullabAIEvent) {
 
 export async function requestLocalNotifications() {
   if (!window.isSecureContext || !("Notification" in window)) {
-    return "การแจ้งเตือนต้องใช้เบราว์เซอร์ที่รองรับและเปิดผ่าน HTTPS หรือ localhost";
+    return "Notifications require a supported browser and HTTPS or localhost.";
   }
   if (await Notification.requestPermission() !== "granted") {
-    return "เบราว์เซอร์ยังไม่ได้อนุญาตการแจ้งเตือน";
+    return "Notifications are blocked by your browser.";
   }
   if ("serviceWorker" in navigator) {
     try {
@@ -35,13 +35,13 @@ export async function requestLocalNotifications() {
       // Desktop browsers can still display notifications directly.
     }
   }
-  return "เปิดแจ้งเตือนขณะเปิดหน้าเว็บแล้ว";
+  return "Notifications are on while this page is open.";
 }
 
 export async function notifyLocal(event: LullabAIEvent, bedLabel: string) {
   if (!("Notification" in window) || Notification.permission !== "granted") return;
 
-  const title = event.simulated ? `ทดสอบ · ${alertTitle(event)}` : alertTitle(event);
+  const title = event.simulated ? `Test · ${alertTitle(event)}` : alertTitle(event);
   const options = { body: bedLabel, tag: event.event_id };
   try {
     const registration = await navigator.serviceWorker?.getRegistration();

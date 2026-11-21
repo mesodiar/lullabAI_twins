@@ -13,27 +13,27 @@ interface SafetyBannerProps {
 }
 
 const SLEEP_LABELS: Record<SleepState, string> = {
-  ASLEEP_DEEP: "คาดว่าหลับ",
-  ASLEEP_LIGHT: "คาดว่าหลับตื้น",
-  DROWSY: "เคลิ้มหลับ",
-  AWAKE_CALM: "คาดว่าตื่น",
-  AWAKE_FUSSY: "เริ่มงอแง",
-  CRYING: "กำลังร้องไห้",
-  OUT_OF_CRIB: "นอกเตียง",
+  ASLEEP_DEEP: "Likely asleep",
+  ASLEEP_LIGHT: "Likely in light sleep",
+  DROWSY: "Drowsy",
+  AWAKE_CALM: "Likely awake",
+  AWAKE_FUSSY: "Fussy",
+  CRYING: "Crying",
+  OUT_OF_CRIB: "Out of crib",
 };
 
 const POSTURE_LABELS: Record<string, string> = {
-  SUPINE: "นอนหงาย",
-  PRONE: "นอนคว่ำ",
-  SIDE: "นอนตะแคง",
-  SITTING_OR_STANDING: "นั่ง / ยืน",
+  SUPINE: "On back",
+  PRONE: "Face down",
+  SIDE: "On side",
+  SITTING_OR_STANDING: "Sitting / standing",
 };
 
 const SUBJECT_LABELS: Record<DetectedSubjectType, string> = {
-  NONE: "ไม่พบในภาพ",
-  ADULT: "พบผู้ใหญ่",
-  PET: "พบน้องหมา",
-  BABY: "พบเด็กทารก",
+  NONE: "None detected",
+  ADULT: "Adult detected",
+  PET: "Dog detected",
+  BABY: "Baby detected",
 };
 
 export function SafetyBanner({ baby, bedLabel, cameraConfigured, monitoring, simulated, useMock, petCoverSuspected, onViewCamera }: SafetyBannerProps) {
@@ -42,18 +42,18 @@ export function SafetyBanner({ baby, bedLabel, cameraConfigured, monitoring, sim
   const state = !monitoring ? "offline" : isWarning ? "warning" : "monitoring";
   const Icon = !monitoring ? VideoOff : isWarning ? TriangleAlert : BedDouble;
   const title = !monitoring
-    ? useMock ? "กำลังใช้ภาพจำลอง" : cameraConfigured ? "ยังไม่มีข้อมูลเฝ้าระวัง" : "ยังไม่ได้ตั้งค่ากล้อง"
+    ? useMock ? "Showing mock feed" : cameraConfigured ? "No monitoring data" : "Camera not configured"
     : petCoverSuspected
-    ? "สงสัยว่าผ้าปิดหน้าน้องหมา"
+    ? "Possible blanket over dog's face"
     : isWarning
-    ? baby.safety_status === "CRITICAL" ? "ควรตรวจดูทันที" : "ตรวจพบเสียงคล้ายเสียงร้อง"
-    : subject === "NONE" ? "คอก / เตียงว่าง" : SUBJECT_LABELS[subject];
+    ? baby.safety_status === "CRITICAL" ? "Check immediately" : "Possible crying detected"
+    : subject === "NONE" ? "Crib empty" : SUBJECT_LABELS[subject];
   const note = !monitoring
     ? bedLabel
-    : `${bedLabel} · ${simulated ? "เหตุการณ์จำลอง" : isWarning ? "ควรตรวจดู" : subject === "ADULT" ? "พักการแจ้งเตือนเด็ก" : "กำลังเฝ้าระวัง"}`;
+    : `${bedLabel} · ${simulated ? "Simulated event" : isWarning ? "Check now" : subject === "ADULT" ? "Baby alerts paused" : "Monitoring"}`;
 
   return (
-    <section className="status-bar" data-state={state} aria-label="สถานะเตียง">
+    <section className="status-bar" data-state={state} aria-label="Bed status">
       <div className="status-lead">
         <span className="status-icon"><Icon aria-hidden="true" /></span>
         <div className="status-copy" role="status" aria-atomic="true">
@@ -61,14 +61,14 @@ export function SafetyBanner({ baby, bedLabel, cameraConfigured, monitoring, sim
           <p>{note}</p>
         </div>
         {monitoring && isWarning && (
-          <button className="status-action" type="button" onClick={onViewCamera}>ดูภาพ</button>
+          <button className="status-action" type="button" onClick={onViewCamera}>View camera</button>
         )}
       </div>
       {monitoring && (
         <dl className="status-details">
-          <div><dt>ในภาพ</dt><dd>{petCoverSuspected ? "ควรตรวจดูน้องหมา" : SUBJECT_LABELS[subject]}</dd></div>
-          <div><dt>การนอน</dt><dd>{isWarning && baby.current_sleep_state !== "CRYING" ? "รอตรวจสอบ" : SLEEP_LABELS[baby.current_sleep_state]}</dd></div>
-          <div><dt>ท่านอน</dt><dd>{petCoverSuspected ? "รอตรวจสอบ" : POSTURE_LABELS[baby.posture] ?? "รอตรวจสอบ"}</dd></div>
+          <div><dt>In view</dt><dd>{petCoverSuspected ? "Check the dog" : SUBJECT_LABELS[subject]}</dd></div>
+          <div><dt>Sleep</dt><dd>{isWarning && baby.current_sleep_state !== "CRYING" ? "Unknown" : SLEEP_LABELS[baby.current_sleep_state]}</dd></div>
+          <div><dt>Position</dt><dd>{petCoverSuspected ? "Unknown" : POSTURE_LABELS[baby.posture] ?? "Unknown"}</dd></div>
         </dl>
       )}
     </section>

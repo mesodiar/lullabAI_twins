@@ -1,4 +1,4 @@
-import { Bell, MoonStar, Settings } from "lucide-react";
+import { Bell, ChevronDown, MoonStar, Settings } from "lucide-react";
 import { useEffect, useState } from "react";
 import "./dashboard.css";
 import { EventFeed } from "./components/EventFeed";
@@ -17,11 +17,11 @@ const EDGE_STATUS_URL =
   import.meta.env.VITE_EDGE_STATUS_URL || `${EDGE_BASE_URL}/status`;
 
 const BEDS = ["baby_1", "baby_2"] as const;
-const BED_LABELS = { baby_1: "เตียง 1", baby_2: "เตียง 2" };
+const BED_LABELS = { baby_1: "Bed 1", baby_2: "Bed 2" };
 const STALE_AFTER_MS = 5_000;
 
 type BedId = typeof BEDS[number];
-type DashboardProfile = BabyProfile & { cameraConfigured?: boolean; petCoverSuspected?: boolean; simulated?: string };
+type DashboardProfile = BabyProfile & { cameraConfigured?: boolean; petCoverSuspected?: boolean };
 
 const initialBabies: Record<BedId, DashboardProfile> = {
   baby_1: initialProfile("baby_1", "cam_crib_1"),
@@ -59,16 +59,29 @@ export function App() {
   const [events, setEvents] = useState<LullabAIEvent[]>([]);
   const [notificationStatus, setNotificationStatus] = useState(() =>
     "Notification" in window && Notification.permission === "granted"
-      ? "เปิดแจ้งเตือนขณะเปิดหน้าเว็บแล้ว"
-      : "แจ้งเตือนขณะเปิดหน้าเว็บ"
+      ? "Notifications are on while this page is open."
+      : "Get alerts while this page is open."
   );
   const [useMock, setUseMock] = useState(false);
   const [showDetection, setShowDetection] = useState(true);
   const [connection, setConnection] = useState("");
+  const [simulation, setSimulation] = useState<{ bed: BedId; trigger: SimulatedTrigger } | null>(null);
+  const [simulationFeedback, setSimulationFeedback] = useState<{ bed: BedId; pending: boolean; message: string } | null>(null);
+  const [mockFeedVersion, setMockFeedVersion] = useState(0);
 
   const activeBaby = babies[selectedBabyId];
   const cameraConfigured = selectedBabyId === "baby_1" || activeBaby.cameraConfigured === true;
-  const monitoring = Boolean(activeBaby.simulated || (!useMock && activeBaby.edge_online && activeBaby.last_heartbeat_at));
+  const simulatedTrigger = simulation?.bed === selectedBabyId && (useMock || activeBaby.safety_status === "SAFE")
+    ? simulation.trigger
+    : undefined;
+  const statusBaby: BabyProfile = simulatedTrigger ? {
+    ...activeBaby,
+    subject_type: simulatedTrigger === "BAND_ROLLOVER" ? "NONE" : "BABY",
+    current_sleep_state: simulatedTrigger === "CRY" ? "CRYING" : "AWAKE_CALM",
+    posture: "UNKNOWN",
+    safety_status: simulatedTrigger === "BAND_ROLLOVER" ? "CRITICAL" : simulatedTrigger === "CRY" ? "WARNING" : "SAFE",
+  } : activeBaby;
+  const monitoring = Boolean(simulatedTrigger || (!useMock && activeBaby.edge_online && activeBaby.last_heartbeat_at));
 
   useEffect(() => {
     const controller = new AbortController();
@@ -98,7 +111,6 @@ export function App() {
               band_bbox_pct: metrics.band_bbox_pct ?? null,
               subject_type: subject,
               petCoverSuspected: warning,
-              simulated: undefined,
               current_sleep_state: monitored
                 ? metrics.motion_score > 4.5 ? "AWAKE_CALM" : "ASLEEP_DEEP"
                 : "OUT_OF_CRIB",
@@ -167,7 +179,7 @@ export function App() {
     try {
       setNotificationStatus(await requestLocalNotifications());
     } catch {
-      setNotificationStatus("เปิดการแจ้งเตือนไม่สำเร็จ");
+      setNotificationStatus("Could not enable notifications.");
     }
   };
 
@@ -218,32 +230,36 @@ export function App() {
     };
 
     setEvents((prev) => [event, ...prev]);
-    setBabies((prev) => ({
-      ...prev,
-      [selectedBabyId]: {
-        ...prev[selectedBabyId],
-        band_detected: !isRollover,
-        band_bbox_pct: null,
-        subject_type: isRollover ? "NONE" : "BABY",
-        breathing_rpm: null,
-        petCoverSuspected: false,
-        simulated: eventId,
-        posture: "UNKNOWN",
-        current_sleep_state: isCry ? "CRYING" : "AWAKE_CALM",
-        safety_status: isRollover ? "CRITICAL" : isCry ? "WARNING" : "SAFE",
-      },
-    }));
-
+    setSimulation({ bed: selectedBabyId, trigger });
     void notifyLocal(event, BED_LABELS[selectedBabyId]);
   };
 
   const simulate = async (mode: "NORMAL" | "CRY" | "ROLLOVER" | "MOTION", trigger?: SimulatedTrigger) => {
-    try {
-      await fetch(`${MOCK_CAMERA_URL}/simulate/${mode}`, { method: "POST" });
-    } catch {
-      // The browser can still simulate an alert when the mock camera is unavailable.
-    }
+    if (simulationFeedback?.pending) return;
+    setSimulationFeedback({
+      bed: selectedBabyId,
+      pending: true,
+      message: trigger ? "Starting simulation…" : "Resetting simulation…",
+    });
     if (trigger) handleSimulateTrigger(trigger);
+    else setSimulation(null);
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 3000);
+    let message: string;
+    try {
+      const response = await fetch(`${MOCK_CAMERA_URL}/simulate/${mode}`, { method: "POST", signal: controller.signal });
+      if (!response.ok || (await response.json())?.mode !== mode) throw new Error("Mock camera did not confirm the mode");
+      if (!trigger) setMockFeedVersion((version) => version + 1);
+      message = trigger ? "Simulation started." : "Simulation cleared. Mock feed reset to normal.";
+    } catch {
+      message = trigger
+        ? "Test event added. Could not update the mock feed."
+        : "Simulation cleared. Could not reset the mock feed.";
+    } finally {
+      window.clearTimeout(timeout);
+    }
+    setSimulationFeedback({ bed: selectedBabyId, pending: false, message });
   };
 
   const viewCamera = () => {
@@ -258,7 +274,7 @@ export function App() {
             <span className="brand-icon"><MoonStar aria-hidden="true" /></span>
             LullabAI Twins
           </h1>
-          <div className="beds" role="group" aria-label="เลือกเตียง">
+          <div className="beds" role="group" aria-label="Select a bed">
             {BEDS.map((bed) => (
               <button type="button" key={bed} aria-pressed={selectedBabyId === bed} onClick={() => setSelectedBabyId(bed)}>
                 {BED_LABELS[bed]}
@@ -267,37 +283,27 @@ export function App() {
           </div>
           <div className="quick-actions">
             <details className="app-menu" name="dashboard-menu">
-              <summary className="icon-button" aria-label="การแจ้งเตือน"><Bell aria-hidden="true" /></summary>
-              <section className="menu-panel" aria-label="การแจ้งเตือน">
-                <h2>การแจ้งเตือน</h2>
+              <summary className="icon-button" aria-label="Notifications"><Bell aria-hidden="true" /></summary>
+              <section className="menu-panel" aria-label="Notifications">
+                <h2>Notifications</h2>
                 <p className="section-caption" role="status">{notificationStatus}</p>
-                <button className="menu-button" type="button" onClick={handleEnableNotifications}>เปิดรับแจ้งเตือน</button>
+                <button className="menu-button" type="button" onClick={handleEnableNotifications}>Enable notifications</button>
               </section>
             </details>
             <details className="app-menu" name="dashboard-menu">
-              <summary className="icon-button" aria-label="ตั้งค่า"><Settings aria-hidden="true" /></summary>
-              <section className="menu-panel" aria-label="ตั้งค่ากล้อง">
-                <h2>ตั้งค่ากล้อง</h2>
-                <label><input type="checkbox" checked={useMock} onChange={(event) => setUseMock(event.target.checked)} /> ใช้ภาพจำลอง</label>
-                <label><input type="checkbox" checked={showDetection} onChange={(event) => setShowDetection(event.target.checked)} /> แสดงกรอบตรวจจับ</label>
+              <summary className="icon-button" aria-label="Settings"><Settings aria-hidden="true" /></summary>
+              <section className="menu-panel" aria-label="Camera settings">
+                <h2>Camera settings</h2>
+                <label><input type="checkbox" checked={useMock} onChange={(event) => setUseMock(event.target.checked)} /> Use mock camera</label>
+                <label><input type="checkbox" checked={showDetection} onChange={(event) => setShowDetection(event.target.checked)} /> Show detection boxes</label>
                 <details className="menu-detail">
-                  <summary>ข้อมูลการเชื่อมต่อ</summary>
+                  <summary>Connection details</summary>
                   <dl>
-                    <div><dt>กล้อง</dt><dd>{activeBaby.camera_id}</dd></div>
-                    <div><dt>สตรีม</dt><dd>{connection}</dd></div>
-                    <div><dt>การเคลื่อนไหว</dt><dd>{monitoring ? activeBaby.motion_score?.toFixed(1) ?? "—" : "—"}</dd></div>
-                    <div><dt>เก็บคลิป</dt><dd>บนเครื่อง Edge</dd></div>
+                    <div><dt>Camera</dt><dd>{activeBaby.camera_id}</dd></div>
+                    <div><dt>Stream</dt><dd>{connection}</dd></div>
+                    <div><dt>Motion score</dt><dd>{monitoring ? activeBaby.motion_score?.toFixed(1) ?? "—" : "—"}</dd></div>
+                    <div><dt>Clip storage</dt><dd>Local (Edge)</dd></div>
                   </dl>
-                </details>
-                <details className="menu-detail">
-                  <summary>ทดสอบเหตุการณ์</summary>
-                  <label><input type="checkbox" checked={activeBaby.subject_mode === "PET_TEST"} onChange={toggleSubjectMode} /> จำลองกับน้องหมา</label>
-                  <div className="simulation-actions">
-                    <button className="menu-button" type="button" onClick={() => simulate("NORMAL")}>รีเซ็ตภาพจำลอง</button>
-                    <button className="menu-button" type="button" onClick={() => simulate("CRY", "CRY")}>เสียงร้อง</button>
-                    <button className="menu-button" type="button" onClick={() => simulate("ROLLOVER", "BAND_ROLLOVER")}>พลิกคว่ำ / หน้าถูกบัง</button>
-                    <button className="menu-button" type="button" onClick={() => simulate("MOTION", "MOTION")}>ดิ้นแรง</button>
-                  </div>
                 </details>
               </section>
             </details>
@@ -307,13 +313,13 @@ export function App() {
 
       <main className="dashboard">
         <SafetyBanner
-          baby={activeBaby}
+          baby={statusBaby}
           bedLabel={BED_LABELS[selectedBabyId]}
           cameraConfigured={cameraConfigured}
           monitoring={monitoring}
-          simulated={Boolean(activeBaby.simulated)}
+          simulated={Boolean(simulatedTrigger)}
           useMock={useMock}
-          petCoverSuspected={activeBaby.petCoverSuspected}
+          petCoverSuspected={!simulatedTrigger && activeBaby.petCoverSuspected}
           onViewCamera={viewCamera}
         />
         <LivePlayer
@@ -321,12 +327,30 @@ export function App() {
           baby={activeBaby}
           cameraConfigured={cameraConfigured}
           useMock={useMock}
+          mockFeedVersion={mockFeedVersion}
           showDetection={showDetection}
           go2rtcUrl={GO2RTC_URL}
           edgeBaseUrl={EDGE_BASE_URL}
           mockCameraUrl={MOCK_CAMERA_URL}
           onConnectionChange={setConnection}
-        />
+        >
+          <details className="simulation-panel">
+            <summary>
+              Simulate an event
+              <ChevronDown aria-hidden="true" />
+            </summary>
+            <label><input type="checkbox" checked={activeBaby.subject_mode === "PET_TEST"} onChange={toggleSubjectMode} /> Simulate with a dog</label>
+            <fieldset className="simulation-actions" disabled={simulationFeedback?.pending} aria-label="Simulation actions">
+              <button className="menu-button" type="button" onClick={() => simulate("NORMAL")}>Reset simulation</button>
+              <button className="menu-button" type="button" onClick={() => simulate("CRY", "CRY")}>Crying</button>
+              <button className="menu-button" type="button" onClick={() => simulate("ROLLOVER", "BAND_ROLLOVER")}>Rollover / covered face</button>
+              <button className="menu-button" type="button" onClick={() => simulate("MOTION", "MOTION")}>Strong movement</button>
+            </fieldset>
+            <p className="section-caption simulation-feedback" role="status">
+              {simulationFeedback?.bed === selectedBabyId ? simulationFeedback.message : ""}
+            </p>
+          </details>
+        </LivePlayer>
         <EventFeed key={`history-${selectedBabyId}`} edgeBaseUrl={EDGE_BASE_URL} events={events.filter((event) => event.baby_id === selectedBabyId)} />
       </main>
     </div>

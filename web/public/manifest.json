@@ -1,7 +1,8 @@
 {
   "name": "LullabAI Twins Baby Monitor",
   "short_name": "LullabAI",
-  "description": "Smart Baby & Breathing Band Monitor with Sub-second WebRTC and Gemini System 2 Safety AI",
+  "lang": "en",
+  "description": "Live camera feeds, local event history, and alerts for two beds.",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#020617",

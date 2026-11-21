@@ -18,11 +18,11 @@ self.addEventListener("push", (event) => {
   const title =
     data.title ||
     (stage === "FAST_PATH_EDGE"
-      ? "🚨 ตรวจพบเสียงร้อง/การขยับ — กำลังวิเคราะห์..."
-      : "🧠 ผลวิเคราะห์จาก LullabAI");
+      ? "Possible crying or movement detected. Reviewing event…"
+      : "LullabAI event review");
 
   const options = {
-    body: data.body || "แตะเพื่อเปิดดูกล้องสดและผลวิเคราะห์",
+    body: data.body || "Tap to open the live view and event details",
     tag: eventId, // Using the same event_id tag replaces Stage-1 alert with Stage-2 AI insight!
     renotify: stage === "FAST_PATH_EDGE" || isCritical,
     requireInteraction: isCritical,

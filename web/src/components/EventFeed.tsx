@@ -4,8 +4,8 @@ import type { LullabAIEvent } from "../lib/types";
 import { alertTitle, isImportantAlert, isPetCoverAlert } from "../localAlerts";
 
 const RECENT_EVENT_LIMIT = 3;
-const TIME_FORMAT = new Intl.DateTimeFormat("th-TH", { hour: "2-digit", minute: "2-digit" });
-const DATE_FORMAT = new Intl.DateTimeFormat("th-TH", { day: "numeric", month: "short" });
+const TIME_FORMAT = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit" });
+const DATE_FORMAT = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short" });
 
 interface EventFeedProps {
   events: LullabAIEvent[];
@@ -26,9 +26,9 @@ export function EventFeed({ events, edgeBaseUrl }: EventFeedProps) {
   return (
     <section className="history" aria-labelledby={headingId}>
       <div className="section-bar">
-        <h2 id={headingId}>เหตุการณ์ล่าสุด</h2>
+        <h2 id={headingId}>Recent events</h2>
         {alerts.length > 0 && alerts.every((event) => new Date(event.created_at).toDateString() === today) && (
-          <span className="section-caption">วันนี้</span>
+          <span className="section-caption">Today</span>
         )}
       </div>
       <div id={historyId}>
@@ -37,11 +37,11 @@ export function EventFeed({ events, edgeBaseUrl }: EventFeedProps) {
           const petCover = isPetCoverAlert(event);
           const urgent = petCover || event.trigger_type === "BAND_ROLLOVER" ||
             event.trigger_type === "BREATHING_ANOMALY" || analysis?.safety_alert || analysis?.urgency === "CRITICAL";
-          const label = event.simulated ? "จำลอง" : urgent ? "ควรตรวจดู" : analysis ? "ตรวจสอบแล้ว" : "ตรวจพบที่เครื่อง";
+          const label = event.simulated ? "Simulated" : urgent ? "Check now" : analysis ? "Reviewed" : "Detected locally";
           const Icon = urgent ? TriangleAlert : event.trigger_type === "CRY" ? AudioLines : Activity;
           const created = new Date(event.created_at);
           const time = Number.isNaN(created.getTime())
-            ? "ไม่ทราบเวลา"
+            ? "Unknown time"
             : `${created.toDateString() === today ? "" : DATE_FORMAT.format(created) + " "}${TIME_FORMAT.format(created)}`;
           const video = event.media?.local_video_path;
           const image = event.media?.local_snapshot_path;
@@ -62,27 +62,27 @@ export function EventFeed({ events, edgeBaseUrl }: EventFeedProps) {
                 <ChevronDown className="chevron" aria-hidden="true" />
               </summary>
               <div className="event-detail">
-                {analysis?.title_th && <p className="event-result">{analysis.title_th}</p>}
-                <p>
+                {analysis?.title_th && <p className="event-result" lang="th">{analysis.title_th}</p>}
+                <p lang={analysis?.reason_hypothesis_th ? "th" : undefined}>
                   {analysis?.reason_hypothesis_th || (petCover
-                    ? "พบผ้าทับบริเวณที่ติดตามน้องหมา"
-                    : event.trigger_type === "CRY" ? "ผลประเมินเบื้องต้นจากลักษณะของเสียง" : label)}
+                    ? "The detector spotted what may be a blanket over the dog's face."
+                    : event.trigger_type === "CRY" ? "The detector heard a sound that resembled crying." : label)}
                 </p>
-                {analysis?.recommended_action_th && <p>{analysis.recommended_action_th}</p>}
+                {analysis?.recommended_action_th && <p lang="th">{analysis.recommended_action_th}</p>}
                 {localMedia?.startsWith("/media/") && (
                   <a className="text-action" href={edgeBaseUrl.replace(/\/$/, "") + localMedia} target="_blank" rel="noreferrer">
-                    {video ? "ดูคลิป" : "ดูภาพเหตุการณ์"}
+                    {video ? "View clip" : "View snapshot"}
                   </a>
                 )}
               </div>
             </details>
           );
         })}
-        {!visibleAlerts.length && <p className="section-caption">ยังไม่มีเหตุการณ์</p>}
+        {!visibleAlerts.length && <p className="section-caption">No events yet</p>}
       </div>
       {hasOlder && (
         <button type="button" className="text-action history-toggle" aria-controls={historyId}
-          aria-expanded={showOlder} onClick={() => setShowOlder(!showOlder)} lang="en">
+          aria-expanded={showOlder} onClick={() => setShowOlder(!showOlder)}>
           {showOlder ? "See less" : "See more"} <ChevronDown aria-hidden="true" />
         </button>
       )}

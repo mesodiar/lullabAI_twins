@@ -1,5 +1,5 @@
 import { Maximize, Minimize, VideoOff, Volume2, VolumeX } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { BabyProfile } from "../lib/types";
 import { connectGo2RTCStream, type StreamProtocol } from "../lib/webrtc";
 
@@ -10,15 +10,17 @@ interface LivePlayerProps {
   baby: BabyProfile;
   cameraConfigured: boolean;
   useMock: boolean;
+  mockFeedVersion: number;
   showDetection: boolean;
   go2rtcUrl: string;
   edgeBaseUrl: string;
   mockCameraUrl: string;
   onConnectionChange: (connection: string) => void;
+  children?: ReactNode;
 }
 
 export function LivePlayer({
-  baby, cameraConfigured, useMock, showDetection, go2rtcUrl, edgeBaseUrl, mockCameraUrl, onConnectionChange,
+  baby, cameraConfigured, useMock, mockFeedVersion, showDetection, go2rtcUrl, edgeBaseUrl, mockCameraUrl, onConnectionChange, children,
 }: LivePlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [protocol, setProtocol] = useState<StreamProtocol>("CONNECTING");
@@ -27,6 +29,7 @@ export function LivePlayer({
   const [muted, setMuted] = useState(true);
   const [expanded, setExpanded] = useState(false);
   const [frameAspectRatio, setFrameAspectRatio] = useState(16 / 9);
+  const mockVersion = useMock ? mockFeedVersion : 0;
 
   useEffect(() => {
     setReady(false);
@@ -49,7 +52,7 @@ export function LivePlayer({
       if (source?.startsWith("blob:")) URL.revokeObjectURL(source);
       if (source) video.removeAttribute("src");
     };
-  }, [baby.stream_name, cameraConfigured, go2rtcUrl, useMock]);
+  }, [baby.stream_name, cameraConfigured, go2rtcUrl, useMock, mockVersion]);
 
   useEffect(() => {
     if (!expanded) return;
@@ -66,14 +69,14 @@ export function LivePlayer({
   const imageUrl = {
     EDGE_CAM: `${edgeBaseUrl}/stream.mjpeg?baby_id=${encodeURIComponent(baby.baby_id)}`,
     GO2RTC: `${go2rtcUrl}/api/stream.mjpeg?src=${encodeURIComponent(baby.stream_name)}`,
-    MOCK: `${mockCameraUrl}/stream.mjpeg?baby=${encodeURIComponent(baby.baby_id)}`,
+    MOCK: `${mockCameraUrl}/stream.mjpeg?baby=${encodeURIComponent(baby.baby_id)}&v=${mockVersion}`,
     STATIC: "/sample_baby_band.jpg",
     UNAVAILABLE: undefined,
   }[imageSource];
 
-  const connection = unavailable ? "ยังไม่เชื่อมต่อ" : !ready ? "กำลังเชื่อมต่อ"
-    : usingSample ? (imageSource === "STATIC" ? "ภาพตัวอย่าง" : "ภาพจำลอง") : "ออนไลน์";
-  const connectionDetail = connection === "ออนไลน์" ? (imageMode ? "MJPEG" : protocol) : connection;
+  const connection = unavailable ? "Offline" : !ready ? "Connecting"
+    : usingSample ? (imageSource === "STATIC" ? "Sample image" : "Mock feed") : "Online";
+  const connectionDetail = connection === "Online" ? (imageMode ? "MJPEG" : protocol) : connection;
   useEffect(() => onConnectionChange(connectionDetail), [connectionDetail, onConnectionChange]);
 
   const nextImageSource = () => {
@@ -96,8 +99,8 @@ export function LivePlayer({
   return (
     <section className="camera" aria-labelledby="camera-title">
       <div className="section-bar">
-        <h2 id="camera-title" tabIndex={-1}>ภาพสด</h2>
-        <span className="connection" data-live={connection === "ออนไลน์"}>
+        <h2 id="camera-title" tabIndex={-1}>Live view</h2>
+        <span className="connection" data-live={connection === "Online"}>
           <span className="connection-dot" aria-hidden="true" />{connection}
         </span>
       </div>
@@ -109,7 +112,7 @@ export function LivePlayer({
             playsInline
             muted={muted}
             hidden={imageMode || unavailable}
-            aria-label="ภาพสดจากกล้อง"
+            aria-label="Live camera feed"
             onPlaying={() => setReady(true)}
             onWaiting={() => setReady(false)}
             onResize={(event) => {
@@ -121,7 +124,7 @@ export function LivePlayer({
             <img
               key={imageSource}
               src={imageUrl}
-              alt={usingSample ? connectionDetail : "ภาพสดจากกล้อง"}
+              alt={usingSample ? connectionDetail : "Live camera feed"}
               onLoad={(event) => {
                 const { naturalWidth, naturalHeight } = event.currentTarget;
                 if (naturalHeight > 0) setFrameAspectRatio(naturalWidth / naturalHeight);
@@ -131,10 +134,10 @@ export function LivePlayer({
             />
           )}
           {unavailable && (
-            <div className="no-camera"><VideoOff aria-hidden="true" />ไม่มีภาพสด</div>
+            <div className="no-camera"><VideoOff aria-hidden="true" />No live feed</div>
           )}
           {usingSample && !unavailable && (
-            <span className="image-label">{imageSource === "STATIC" ? "ภาพตัวอย่าง" : "ภาพจำลอง"}</span>
+            <span className="image-label">{imageSource === "STATIC" ? "Sample image" : "Mock feed"}</span>
           )}
           {detectionBox && (baby.band_detected || baby.subject_type === "ADULT") && (
             <div
@@ -153,13 +156,13 @@ export function LivePlayer({
           <div className="player-bar">
             {hasAudio && (
               <button type="button" className="text-action" aria-pressed={!muted} onClick={() => setMuted(!muted)}>
-                <VolumeIcon aria-hidden="true" />{muted ? "เปิดเสียง" : "ปิดเสียง"}
+                <VolumeIcon aria-hidden="true" />{muted ? "Unmute" : "Mute"}
               </button>
             )}
             <button
               type="button"
               className="icon-button"
-              aria-label={expanded ? "ย่อภาพ" : "ขยายภาพ"}
+              aria-label={expanded ? "Exit expanded view" : "Expand live view"}
               aria-expanded={expanded}
               onClick={() => setExpanded(!expanded)}
             >
@@ -168,6 +171,7 @@ export function LivePlayer({
           </div>
         )}
       </div>
+      {children}
     </section>
   );
 }
