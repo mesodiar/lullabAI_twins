@@ -1,8 +1,8 @@
 import { Bell, ChevronDown, MoonStar, Settings } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import "./dashboard.css";
 import { EventFeed } from "./components/EventFeed";
-import { LivePlayer, type SimulatedTrigger } from "./components/LivePlayer";
+import { LivePlayer } from "./components/LivePlayer";
 import { SafetyBanner } from "./components/SafetyBanner";
 import { isImportantAlert, notifyLocal, requestLocalNotifications } from "./localAlerts";
 import type { BabyProfile, EdgeMetrics, LullabAIEvent } from "./lib/types";
@@ -19,8 +19,10 @@ const EDGE_STATUS_URL =
 const BEDS = ["baby_1", "baby_2"] as const;
 const BED_LABELS = { baby_1: "Bed 1", baby_2: "Bed 2" };
 const STALE_AFTER_MS = 5_000;
+const CRY_CLIP_ID = "n-R3LzEtumg";
 
 type BedId = typeof BEDS[number];
+type SimulatedTrigger = "BAND_ROLLOVER" | "MOTION";
 type DashboardProfile = BabyProfile & { cameraConfigured?: boolean; petCoverSuspected?: boolean };
 
 const initialBabies: Record<BedId, DashboardProfile> = {
@@ -68,6 +70,8 @@ export function App() {
   const [simulation, setSimulation] = useState<{ bed: BedId; trigger: SimulatedTrigger } | null>(null);
   const [simulationFeedback, setSimulationFeedback] = useState<{ bed: BedId; pending: boolean; message: string } | null>(null);
   const [mockFeedVersion, setMockFeedVersion] = useState(0);
+  const [cryTest, setCryTest] = useState<{ bed: BedId; startedAt: number } | null>(null);
+  const cryTestDialog = useRef<HTMLDialogElement>(null);
 
   const activeBaby = babies[selectedBabyId];
   const cameraConfigured = selectedBabyId === "baby_1" || activeBaby.cameraConfigured === true;
@@ -77,11 +81,15 @@ export function App() {
   const statusBaby: BabyProfile = simulatedTrigger ? {
     ...activeBaby,
     subject_type: simulatedTrigger === "BAND_ROLLOVER" ? "NONE" : "BABY",
-    current_sleep_state: simulatedTrigger === "CRY" ? "CRYING" : "AWAKE_CALM",
+    current_sleep_state: "AWAKE_CALM",
     posture: "UNKNOWN",
-    safety_status: simulatedTrigger === "BAND_ROLLOVER" ? "CRITICAL" : simulatedTrigger === "CRY" ? "WARNING" : "SAFE",
+    safety_status: simulatedTrigger === "BAND_ROLLOVER" ? "CRITICAL" : "SAFE",
   } : activeBaby;
   const monitoring = Boolean(simulatedTrigger || (!useMock && activeBaby.edge_online && activeBaby.last_heartbeat_at));
+  const heardCrying = cryTest && events.some((event) =>
+    event.baby_id === cryTest.bed && event.trigger_type === "CRY" && !event.simulated &&
+    isImportantAlert(event) && Date.parse(event.created_at) >= cryTest.startedAt
+  );
 
   useEffect(() => {
     const controller = new AbortController();
@@ -200,7 +208,6 @@ export function App() {
   const handleSimulateTrigger = (trigger: SimulatedTrigger) => {
     const eventId = `sim_${Date.now()}`;
     const isRollover = trigger === "BAND_ROLLOVER";
-    const isCry = trigger === "CRY";
 
     const event: LullabAIEvent = {
       event_id: eventId,
@@ -213,12 +220,8 @@ export function App() {
       created_at: new Date().toISOString(),
       analyzed_at: null,
       edge_metrics: {
-        yamnet_cry_prob: isCry ? 0.89 : 0.04,
-        yamnet_top_label: isCry
-          ? activeBaby.subject_mode === "PET_TEST"
-            ? "Whimper (dog) / Baby cry"
-            : "Baby cry, infant cry"
-          : "Silence",
+        yamnet_cry_prob: 0.04,
+        yamnet_top_label: "Silence",
         motion_score: isRollover ? 0.9 : 14.6,
         band_detected: !isRollover,
         band_confidence: isRollover ? 0.0 : 0.96,
@@ -234,7 +237,7 @@ export function App() {
     void notifyLocal(event, BED_LABELS[selectedBabyId]);
   };
 
-  const simulate = async (mode: "NORMAL" | "CRY" | "ROLLOVER" | "MOTION", trigger?: SimulatedTrigger) => {
+  const simulate = async (mode: "NORMAL" | "ROLLOVER" | "MOTION", trigger?: SimulatedTrigger) => {
     if (simulationFeedback?.pending) return;
     setSimulationFeedback({
       bed: selectedBabyId,
@@ -260,6 +263,15 @@ export function App() {
       window.clearTimeout(timeout);
     }
     setSimulationFeedback({ bed: selectedBabyId, pending: false, message });
+  };
+
+  const startCryTest = () => {
+    const dialog = cryTestDialog.current;
+    if (!dialog || dialog.open) return;
+    setSimulation(null);
+    setSimulationFeedback(null);
+    dialog.showModal();
+    setCryTest({ bed: selectedBabyId, startedAt: Date.now() });
   };
 
   const viewCamera = () => {
@@ -342,7 +354,7 @@ export function App() {
             <label><input type="checkbox" checked={activeBaby.subject_mode === "PET_TEST"} onChange={toggleSubjectMode} /> Simulate with a dog</label>
             <fieldset className="simulation-actions" disabled={simulationFeedback?.pending} aria-label="Simulation actions">
               <button className="menu-button" type="button" onClick={() => simulate("NORMAL")}>Reset simulation</button>
-              <button className="menu-button" type="button" onClick={() => simulate("CRY", "CRY")}>Crying</button>
+              <button className="menu-button" type="button" onClick={startCryTest}>Crying</button>
               <button className="menu-button" type="button" onClick={() => simulate("ROLLOVER", "BAND_ROLLOVER")}>Rollover / covered face</button>
               <button className="menu-button" type="button" onClick={() => simulate("MOTION", "MOTION")}>Strong movement</button>
             </fieldset>
@@ -353,6 +365,39 @@ export function App() {
         </LivePlayer>
         <EventFeed key={`history-${selectedBabyId}`} edgeBaseUrl={EDGE_BASE_URL} events={events.filter((event) => event.baby_id === selectedBabyId)} />
       </main>
+      <dialog
+        className="cry-test-dialog"
+        ref={cryTestDialog}
+        aria-labelledby="cry-test-title"
+        onClose={() => setCryTest(null)}
+      >
+        <div className="cry-test-heading">
+          <h2 id="cry-test-title">Crying sound test</h2>
+          <button className="menu-button" type="button" onClick={() => cryTestDialog.current?.close()}>Stop test</button>
+        </div>
+        {cryTest && (
+          <>
+            <iframe
+              src={`https://www.youtube.com/embed/${CRY_CLIP_ID}?autoplay=1&playsinline=1`}
+              title="Baby Crying Sound Effect"
+              allow="autoplay; encrypted-media"
+              allowFullScreen
+              referrerPolicy="strict-origin-when-cross-origin"
+            />
+            <p>Use speakers near the camera so its microphone can hear the clip. Press Play in the video if needed.</p>
+            <p className="cry-test-status" role="status">
+              {heardCrying
+                ? `${BED_LABELS[cryTest.bed]} reported possible crying. See Recent events for the alert.`
+                : !babies[cryTest.bed].edge_online
+                ? `Waiting for ${BED_LABELS[cryTest.bed]} to connect to Edge.`
+                : `Waiting for a cry alert from ${BED_LABELS[cryTest.bed]}…`}
+            </p>
+            <a className="text-action" href={`https://www.youtube.com/watch?v=${CRY_CLIP_ID}`} target="_blank" rel="noreferrer">
+              Open on YouTube
+            </a>
+          </>
+        )}
+      </dialog>
     </div>
   );
 }

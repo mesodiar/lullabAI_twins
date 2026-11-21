@@ -3,7 +3,6 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { BabyProfile } from "../lib/types";
 import { connectGo2RTCStream, type StreamProtocol } from "../lib/webrtc";
 
-export type SimulatedTrigger = "CRY" | "BAND_ROLLOVER" | "MOTION";
 type ImageSource = "EDGE_CAM" | "GO2RTC" | "MOCK" | "STATIC" | "UNAVAILABLE";
 
 interface LivePlayerProps {

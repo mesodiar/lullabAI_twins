@@ -169,6 +169,24 @@ body:has(.player-expanded) { overflow: hidden; }
 .simulation-feedback { margin: 8px 9px 0; }
 .simulation-feedback:empty { margin-top: 0; }
 
+.cry-test-dialog {
+  width: min(520px, calc(100% - 24px));
+  max-height: calc(100dvh - 24px);
+  padding: 14px;
+  background: var(--app-panel);
+  color: var(--app-text);
+  border: 1px solid var(--app-line);
+  border-radius: 14px;
+}
+.cry-test-dialog::backdrop { background: #0b0d16bc; }
+.cry-test-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.cry-test-heading h2 { font-size: 16px; }
+.cry-test-heading button { flex: none; }
+.cry-test-dialog iframe { display: block; width: 100%; min-height: 200px; aspect-ratio: 16 / 9; border: 0; background: #0b0d14; }
+.cry-test-dialog p { margin-top: 8px; color: var(--app-muted); }
+.cry-test-dialog .cry-test-status { color: var(--app-text); }
+.cry-test-dialog .text-action { margin-top: 3px; padding-inline: 0; }
+
 .event { border-bottom: 1px solid var(--app-line); }
 .event > summary { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 11px 2px; cursor: pointer; }
 .event > summary:hover .event-summary strong { color: var(--app-accent); }
