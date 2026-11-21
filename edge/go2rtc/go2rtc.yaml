@@ -36,21 +36,6 @@ rtsp:
 
 webrtc:
   listen: ":8555"
-  # Expose localhost:8555 + stun so Docker containers on PC/Mac can establish WebRTC ICE immediately
+  # With local go2rtc, the PWA can fall back to MSE over the local WebSocket.
   candidates:
     - "localhost:8555"
-    - "stun:8555"
-  # Combine Cloudflare STUN + Google STUN + optional Cloudflare Calls TURN server
-  # so WebRTC works both on Home Wi-Fi LAN and remotely over 4G/5G
-  ice_servers:
-    - urls:
-        - "stun:stun.cloudflare.com:3478"
-        - "stun:stun.l.google.com:19302"
-    # Uncomment and set TURN credentials (e.g., Cloudflare Calls TURN) for strict 4G/5G NATs:
-    # - urls:
-    #     - "turn:turn.cloudflare.com:3478?transport=udp"
-    #     - "turn:turn.cloudflare.com:3478?transport=tcp"
-    #     - "turns:turn.cloudflare.com:5349?transport=tcp"
-    #   username: "${TURN_USERNAME}"
-    #   credential: "${TURN_PASSWORD}"
-

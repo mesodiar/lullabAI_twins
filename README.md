@@ -1,113 +1,71 @@
-# LullabAI Twins — Smart Baby & Breathing Band Monitor
+# LullabAI Twins
 
-ระบบติดตามการนอนหลับและความปลอดภัยของเด็กทารก (รองรับการขยายเป็นแฝด 2 เตียง) ที่ใช้สถาปัตยกรรม **System 1 (Edge Reflex)** ร่วมกับ **System 2 (Cloud Run + Vertex AI Gemini)** และรองรับการตรวจจับการหายใจผ่าน **แผ่นพันตัวลายเรขาคณิตขาว-ดำ (Nanit-style Breathing Band)** โดยไม่ต้องใช้เซ็นเซอร์ติดแบตเตอรี่บนตัวเด็ก
+LullabAI Twins ทำงานบนเครื่อง Edge และเครือข่ายในบ้าน กล้องส่งภาพและเสียงผ่าน RTSP เครื่อง Edge ตรวจจับเหตุการณ์ และ Dashboard แสดงภาพสดกับประวัติของแต่ละเตียง
 
----
+## Architecture
 
-## จุดเด่นของระบบ (Key Features)
+```
+[Camera (4K RTSP)] 
+       │
+       ▼ (Local LAN)
+[Ubuntu Mini PC (Edge Node)] 
+  ├── 1. go2rtc (WebRTC Server) ═══════════════════════════════╗ (Sub-second Live Video/Audio)
+  ├── 2. Python Motion / YAMNet Cry Detector (System 1 Reflex) ║
+  └── 3. ส่งคลิป/ภาพเฉพาะตอนมี Event                             ║
+              │                                                ║
+              ▼                                                ║
+      [Cloud Storage] (Auto-delete 7 days)                     ║
+              │ (Eventarc Trigger)                             ║
+              ▼                                                ║
+   [Cloud Run + Vertex AI (Gemini & Argon 4)]                  ║
+     (System 2: Safety Check, Cry Reasoner & Sleep State)      ║
+              │                                                ║
+              ├─── (1) บันทึก Insight & Event Log ──> [Cloud Firestore]
+              │                                                │ (Real-time Sync)
+              └─── (2) ยิง Web Push Alert ─────────> [Firebase Cloud Messaging (FCM)]
+                                                               │ (Wake up via Service Worker)
+                                                               ▼
+                                            📱 [Parent's Mobile PWA (Firebase Hosting)]
+                                               (ดูกล้องสด WebRTC + รับ Alert + ดู Dashboard)
+```
 
-1. **Nanit-style Breathing Band Computer Vision (`edge/detector/src/breathing_band.py`)**
-   - ตรวจจับกลุ่มลวดลายเรขาคณิตขาว-ดำ (สี่เหลี่ยมจัตุรัสและข้าวหลามตัด) ด้วยตัวกรอง **Center-Surround Difference-of-Boxes (DoB)** ที่ทนต่อแสงน้อยและกล้องอินฟราเรดกลางคืน
-   - คำนวณอัตราการหายใจ (**Breathing Rate: RPM / BPM**) แบบไร้สัมผัสด้วยการวัดการขยับระดับ Sub-pixel ของจุดมาร์กเกอร์บนแผ่นพันตัว
-   - ตรวจจับการพลิกตัวคว่ำหน้า (**Rollover Detection**) ทันทีเมื่อลายแผ่นพันตัวหายไปจากกรอบเตียง
-2. **โหมดทดสอบกับสุนัข (`PET_TEST` Mode)**
-   - ตั้งค่า `subject_mode: "PET_TEST"` ใน `edge/detector/config.yaml` เพื่อทดสอบแผ่นพันตัวและการตรวจจับเสียงร้อง/เสียงครางกับน้องหมาก่อนติดตั้งกล้องเตียงเด็กจริง
-3. **การแจ้งเตือน 2 จังหวะ (Two-Stage Fast-Path + AI Update)**
-   - **Stage 1 (Fast-Path < 1–2 วินาที):** ทันทีที่ Edge ตรวจเจอเสียงร้องหรือแผ่นพันตัวหายไป จะเขียนลง Firestore และยิง FCM Web Push ทันทีพร้อมตัดคลิปสั้นจาก **In-Memory Ring Buffer** (ย้อนหลัง 4 วินาที + หลังเกิดเหตุ 3 วินาที) ส่งขึ้น Cloud Storage
-   - **Stage 2 (System 2 Deep Analysis ~5–8 วินาที):** Eventarc ปลุก Cloud Run ให้ส่งคลิปไปวิเคราะห์ด้วย **Vertex AI Gemini** (Safety Check, Posture, Face Covered, Cry Reasoner) แล้วอัปเดตทับ Notification เดิมบนหน้าจอมือถือด้วย `tag: event_id` เดียวกัน
-4. **Periodic Snapshot ทุก 5 นาที**
-   - ส่งภาพนิ่งความละเอียดสูงไปเช็คความปลอดภัยและอัปเดตสถานะการนอนทุก 5 นาทีแบบเงียบๆ (แจ้งเตือนเฉพาะเมื่อพบความเสี่ยง เช่น พลิกคว่ำหรือผ้าคลุมหน้า)
-5. **การดูกล้องสดนอกบ้านผ่าน Cloudflare Tunnel + TURN / MSE Fallback**
-   - `go2rtc` รองรับการสตรีมผ่าน WebRTC (<0.2s) และสลับเป็น MSE ผ่าน WebSocket อัตโนมัติเมื่อดูผ่าน 4G/5G นอกบ้านผ่าน Cloudflare Tunnel
+## Architecture without GCP (Temporary)
 
----
+![Tapo streams live video through go2rtc to the dashboard. The Edge Detector processes video and audio, saves events and clips locally, and sends event updates to the dashboard for browser notifications.](edge/assets/architecture/Architect-wo-gcp.png)
 
-## การเชื่อมต่อกล้องจริง TP-Link Tapo C260 (TP260)
+- **ภาพสด** ใช้ go2rtc โดยหน้าเว็บลอง WebRTC ก่อน แล้วสลับไป MSE หรือ MJPEG เมื่อจำเป็น
+- **การตรวจจับ** ใช้ภาพและเสียงจากกล้องที่ Edge เสียงที่ผ่านเกณฑ์แสดงเป็น “ตรวจพบเสียงคล้ายเสียงร้อง” เพราะคะแนนมาจากลักษณะของเสียง
+- **ประวัติ** บันทึก JSON ลงโฟลเดอร์ `edge/local_events/` และกู้คืนได้หลังรีสตาร์ต หน้าเว็บแสดง 3 รายการล่าสุดต่อเตียง กด **See more** เพื่อดูเพิ่มได้สูงสุด 15 รายการต่อเตียง
+- **คลิป** บันทึกภาพจากบัฟเฟอร์ก่อนและหลังเหตุการณ์ลง `edge/local_events/media/` คลิปเป็นวิดีโอแบบไม่มีเสียง ไฟล์ยังเก็บไว้หลังรีสตาร์ตและโหมดนี้ไม่มีการลบอัตโนมัติ
+- **แจ้งเตือน** เหตุการณ์ใหม่ขึ้นในหน้าเว็บ และเบราว์เซอร์ที่รองรับสามารถแสดงแจ้งเตือนของระบบเมื่อเปิดหน้าไว้และอนุญาต ใช้ `localhost` หรือ HTTPS สำหรับสิทธิ์แจ้งเตือน เมื่อปิดหน้าเว็บ เหตุการณ์ยังถูกบันทึกที่ Edge
+- โหมดนี้ใช้ผลจาก Edge โดยตรง โค้ด Cloud Run, Vertex AI และ FCM เก็บไว้ในโปรเจกต์สำหรับเปิดใช้งานภายหลัง
 
-กล้อง **TP260 (Tapo C260)** รองรับ RTSP ทั้งภาพความละเอียดสูงและเสียงไมโครโฟนผ่าน 2 สตรีม:
-- `stream1` (4K / 2K Main Stream) — สำหรับดูภาพสดผ่าน WebRTC บนหน้าแอป PWA
-- `stream2` (360p Sub Stream) — สำหรับให้ Python AI (System 1) ประมวลผลตรวจจับแผ่นพันตัว การหายใจ และเสียงร้องโดยกิน CPU ต่ำ
+## เริ่มใช้งานด้วยกล้อง Tapo
 
-### ขั้นตอนการตั้งค่า
-1. **เปิดบัญชีกล้อง (Camera Account) และดู IP ในแอป Tapo:**
-   - เปิดแอป **Tapo** บนมือถือ ➔ เลือกกล้อง **TP260** ➔ แตะไอคอนฟันเฟืองมุมขวาบน (**Device Settings**)
-   - ไปที่ **Device Info** เพื่อดูเลข **IP Address** ของกล้อง (เช่น `192.168.1.120`)
-   - ไปที่ **Advanced Settings ➔ Camera Account** เพื่อตั้ง `Username` และ `Password` สำหรับ RTSP (แนะนำให้ใช้ตัวอักษรและตัวเลขธรรมดา หลีกเลี่ยงอักขระพิเศษอย่าง `@` หรือ `:`)
-2. **สร้างไฟล์ `edge/.env` จากเทมเพลต `edge/.env.example`:**
-   ```bash
-   cp edge/.env.example edge/.env
-   ```
-   แก้ไขค่าใน `edge/.env` ให้ตรงกับ Username, Password และ IP ของกล้องคุณ:
-   ```dotenv
-   BABY_1_MAIN_RTSP=rtsp://your_user:your_password@192.168.1.120:554/stream1
-   BABY_1_SUB_RTSP=rtsp://your_user:your_password@192.168.1.120:554/stream2
-   SUBJECT_MODE=PET_TEST
-   ```
-3. **รันระบบ Edge (go2rtc + Python AI Detector) และหน้าเว็บ PWA:**
-   ```bash
-   # Terminal 1: รัน go2rtc + AI Detector
-   cd edge
-   docker compose up --build
+1. ตั้ง Camera Account ในแอป Tapo แล้วคัดลอก `edge/.env.example` เป็น `edge/.env` หากมีไฟล์เดิมอยู่แล้วให้ใช้ค่าที่ตั้งไว้
+2. ตั้ง `BABY_1_MAIN_RTSP` เป็น `stream1` สำหรับภาพสด และ `BABY_1_SUB_RTSP` เป็น `stream2` สำหรับตรวจจับภาพและเสียง ค่า `SUBJECT_MODE` รองรับ `BABY` และ `PET_TEST`
+3. รัน Docker Compose จากโฟลเดอร์ `edge/` และรันเว็บจากโฟลเดอร์ `web/`
 
-   # Terminal 2: รันหน้าเว็บ PWA
-   cd web
-   npm install
-   npm run dev
-   ```
-   - เช็คภาพสดจาก `go2rtc` ได้ที่ `http://localhost:1984`
-   - เช็คค่า AI Telemetry แบบเรียลไทม์ (ตรวจจับแผ่นพันตัว, RPM, เสียงร้อง) ได้ที่ `http://localhost:8095/status`
-   - เปิดหน้าแอปบนเบราว์เซอร์ที่ `http://localhost:5173`
-
----
-
-## การรันทดสอบด้วยภาพตัวอย่าง (Mock Camera + Edge Detector)
-
-แม้ยังไม่ได้ติดตั้งกล้อง RTSP จริง ระบบมี `mock-camera` ที่นำภาพตัวอย่าง (`edge/assets/sample_baby_band.jpg`) มาจำลองการขยับหน้าอกหายใจที่ 32 ครั้ง/นาที พร้อมจำลองเหตุการณ์ต่างๆ ได้ทันที:
-
-### 1. รันด้วย Docker Compose บน Ubuntu Mini PC หรือเครื่อง Mac
 ```bash
+# Terminal 1
 cd edge
-docker compose up --build
-```
-- **Mock Camera Stream:** `http://localhost:8090/stream.mjpeg`
-- **go2rtc Web UI & WebRTC Server:** `http://localhost:1984`
-- **Edge Detector Telemetry API:** `http://localhost:8095/status`
+docker compose up -d --build
 
-สามารถยิงคำสั่งจำลองเหตุการณ์ไปยัง Mock Camera ได้ตลอดเวลา:
-```bash
-# จำลองการนอนหลับและหายใจปกติ (32 RPM)
-curl -X POST http://localhost:8090/simulate/NORMAL
-
-# จำลองเสียงร้องไห้ / เสียงคราง + ดิ้น
-curl -X POST http://localhost:8090/simulate/CRY
-
-# จำลองการพลิกตัวคว่ำหน้า (ไม่เห็นลายแผ่นพันตัว)
-curl -X POST http://localhost:8090/simulate/ROLLOVER
-
-# จำลองการหยุดขยับหายใจ (0 RPM)
-curl -X POST http://localhost:8090/simulate/APNEA
-```
-
-### 2. รันชุดทดสอบอัตโนมัติ (Unit & Integration Tests)
-```bash
-# ทดสอบฝั่ง Edge (Breathing Band Detection, Sub-pixel RPM, Rollover, Audio Cry, Motion)
-.venv/bin/python -m pytest edge/detector/tests/test_edge_detector.py -v
-
-# ทดสอบฝั่ง Cloud (System 2 Eventarc CloudEvent, Vertex AI Prompts, Two-Stage Notifier)
-.venv/bin/python -m pytest cloud/analyzer-service/tests/test_analyzer_service.py -v
-```
-
-### 3. รันหน้าเว็บ Parent's Mobile PWA (`web/`)
-```bash
+# Terminal 2
 cd web
-npm install
+npm ci
 npm run dev
 ```
-เปิดเบราว์เซอร์ไปที่ `http://localhost:5173` จะมีปุ่มจำลองเหตุการณ์ให้กดทดสอบการทำงานตั้งแต่ต้นจนจบได้จากหน้าจอทันที
 
-### 4. การตั้งค่า Google Cloud & Firebase (`cloud/infra/setup_gcp.sh`)
+- Dashboard เปิดที่ `http://localhost:5173` บนเครื่อง Edge หรือ `http://<IP-เครื่อง-Edge>:5173` บนอุปกรณ์ในเครือข่ายเดียวกัน
+- go2rtc ใช้พอร์ต 1984 และ Edge API ใช้พอร์ต 8095 โดยดูสถานะได้ที่ `http://localhost:8095/status`
+- สามารถตั้ง URL เองด้วย `VITE_GO2RTC_URL`, `VITE_EDGE_BASE_URL`, `VITE_EDGE_STATUS_URL` และ `VITE_MOCK_CAMERA_URL`
+- หากเปิด Dashboard ผ่าน HTTPS ให้ตั้ง URL ของบริการที่ใช้ร่วมกันเป็น HTTPS ด้วย พอร์ตกล้องและประวัติใช้สำหรับเครือข่ายภายในบ้าน
+
+## โหมดทดสอบ
+
+ถ้ายังไม่ตั้ง RTSP จริง ระบบใช้ `mock-camera` บนพอร์ต 8090 และสามารถเปิดโหมดจำลองจากเมนูตั้งค่าบน Dashboard ได้ ทดสอบเฉพาะ Edge โดยใช้คำสั่งนี้จากรากโปรเจกต์
+
 ```bash
-export GCP_PROJECT_ID="your-gcp-project-id"
-export GCP_LOCATION="asia-southeast1"
-bash cloud/infra/setup_gcp.sh
+.venv/bin/python -m pytest edge/detector/tests/test_edge_detector.py -v
 ```

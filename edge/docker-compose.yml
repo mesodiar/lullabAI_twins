@@ -32,7 +32,7 @@ services:
     depends_on:
       - mock-camera
 
-  # 3. System 1 Edge Detector (Breathing Band Optical Flow + Motion + YAMNet Cry + Fast-Path Alert)
+  # 3. Local Edge detection and event storage.
   edge-detector:
     build:
       context: .
@@ -44,11 +44,8 @@ services:
     environment:
       - BABY_1_MAIN_RTSP=${BABY_1_MAIN_RTSP:-}
       - BABY_1_SUB_RTSP=${BABY_1_SUB_RTSP:-}
-      - GCP_PROJECT_ID=${GCP_PROJECT_ID:-}
-      - GCS_EVENTS_BUCKET=${GCS_EVENTS_BUCKET:-}
-      - GOOGLE_APPLICATION_CREDENTIALS=/secrets/gcp-service-account.json
-      - DRY_RUN=${DRY_RUN:-false}
-      - LOCAL_ANALYZER_URL=${LOCAL_ANALYZER_URL:-}
+      - BABY_2_MAIN_RTSP=${BABY_2_MAIN_RTSP:-}
+      - BABY_2_SUB_RTSP=${BABY_2_SUB_RTSP:-}
       - SUBJECT_MODE=${SUBJECT_MODE:-PET_TEST}
     volumes:
       - ./detector/config.yaml:/app/config.yaml:ro

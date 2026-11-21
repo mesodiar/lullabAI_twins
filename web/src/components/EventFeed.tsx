@@ -1,111 +1,91 @@
-import React from "react";
-import { LullabAIEvent } from "../lib/types";
+import { Activity, AudioLines, ChevronDown, TriangleAlert } from "lucide-react";
+import { useId, useState } from "react";
+import type { LullabAIEvent } from "../lib/types";
+import { alertTitle, isImportantAlert, isPetCoverAlert } from "../localAlerts";
+
+const RECENT_EVENT_LIMIT = 3;
+const TIME_FORMAT = new Intl.DateTimeFormat("th-TH", { hour: "2-digit", minute: "2-digit" });
+const DATE_FORMAT = new Intl.DateTimeFormat("th-TH", { day: "numeric", month: "short" });
 
 interface EventFeedProps {
   events: LullabAIEvent[];
+  edgeBaseUrl: string;
 }
 
-export const EventFeed: React.FC<EventFeedProps> = ({ events }) => {
-  return (
-    <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4">
-      <div className="flex items-center justify-between mb-3">
-        <div>
-          <h3 className="text-sm font-semibold text-slate-100">
-            🔔 ประวัติการแจ้งเตือน & ผลวิเคราะห์ AI (เก็บคลิปย้อนหลัง 7 วัน)
-          </h3>
-          <p className="text-xs text-slate-400">
-            แสดงการทำงานแบบ Two-Stage: แจ้งเตือนด่วนจาก Edge ทันที ➔ อัปเดตผลวิเคราะห์จาก Vertex AI Gemini
-          </p>
-        </div>
-        <span className="text-xs px-2.5 py-1 rounded-full bg-slate-800 text-slate-300">
-          {events.length} รายการ
-        </span>
-      </div>
+export function EventFeed({ events, edgeBaseUrl }: EventFeedProps) {
+  const [showOlder, setShowOlder] = useState(false);
+  const historyId = useId();
+  const headingId = useId();
+  const today = new Date().toDateString();
+  const alerts = events
+    .filter(isImportantAlert)
+    .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+  const hasOlder = alerts.length > RECENT_EVENT_LIMIT;
+  const visibleAlerts = showOlder ? alerts : alerts.slice(0, RECENT_EVENT_LIMIT);
 
-      <div className="space-y-3 max-h-[420px] overflow-y-auto pr-1">
-        {events.map((evt) => {
-          const isPending = evt.status === "PENDING_AI";
-          const ai = evt.ai_analysis;
-          const isCritical =
-            ai?.safety_alert ||
-            ai?.urgency === "CRITICAL" ||
-            evt.trigger_type === "BAND_ROLLOVER";
+  return (
+    <section className="history" aria-labelledby={headingId}>
+      <div className="section-bar">
+        <h2 id={headingId}>เหตุการณ์ล่าสุด</h2>
+        {alerts.length > 0 && alerts.every((event) => new Date(event.created_at).toDateString() === today) && (
+          <span className="section-caption">วันนี้</span>
+        )}
+      </div>
+      <div id={historyId}>
+        {visibleAlerts.map((event) => {
+          const analysis = event.ai_analysis;
+          const petCover = isPetCoverAlert(event);
+          const urgent = petCover || event.trigger_type === "BAND_ROLLOVER" ||
+            event.trigger_type === "BREATHING_ANOMALY" || analysis?.safety_alert || analysis?.urgency === "CRITICAL";
+          const label = event.simulated ? "จำลอง" : urgent ? "ควรตรวจดู" : analysis ? "ตรวจสอบแล้ว" : "ตรวจพบที่เครื่อง";
+          const Icon = urgent ? TriangleAlert : event.trigger_type === "CRY" ? AudioLines : Activity;
+          const created = new Date(event.created_at);
+          const time = Number.isNaN(created.getTime())
+            ? "ไม่ทราบเวลา"
+            : `${created.toDateString() === today ? "" : DATE_FORMAT.format(created) + " "}${TIME_FORMAT.format(created)}`;
+          const video = event.media?.local_video_path;
+          const image = event.media?.local_snapshot_path;
+          const localMedia = video || image;
 
           return (
-            <div
-              key={evt.event_id}
-              className={`rounded-xl border p-3.5 transition-all ${
-                isPending
-                  ? "bg-indigo-950/40 border-indigo-500/50 animate-pulse"
-                  : isCritical
-                  ? "bg-rose-950/30 border-rose-500/40"
-                  : "bg-slate-950/60 border-slate-800"
-              }`}
-            >
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <span
-                    className={`text-[11px] font-semibold px-2 py-0.5 rounded-md ${
-                      isPending
-                        ? "bg-amber-500/20 text-amber-300 border border-amber-500/40"
-                        : "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
-                    }`}
-                  >
-                    {isPending
-                      ? "⚡ Stage 1: Fast-Path Alert (กำลังรอ Gemini AI...)"
-                      : "🧠 Stage 2: วิเคราะห์โดย Gemini AI แล้ว"}
-                  </span>
-                  <span className="text-xs font-mono text-slate-400">
-                    Trigger: {evt.trigger_type}
-                  </span>
-                </div>
-                <span className="text-[11px] text-slate-400">
-                  {new Date(evt.created_at).toLocaleTimeString("th-TH")}
+            <details className="event" key={event.event_id}>
+              <summary>
+                <span className={`event-icon${urgent || event.trigger_type === "CRY" ? " attention" : ""}`}>
+                  <Icon aria-hidden="true" />
                 </span>
-              </div>
-
-              <div className="mt-2">
-                <div className="text-sm font-semibold text-slate-100">
-                  {ai
-                    ? ai.title_th
-                    : "🚨 แจ้งเตือนด่วนจาก Edge Node — กำลังอัปโหลดคลิป 7 วินาทีให้ AI ตรวจสอบ..."}
-                </div>
-                <p className="text-xs text-slate-300 mt-1 leading-relaxed">
-                  {ai
-                    ? ai.reason_hypothesis_th
-                    : `ตรวจพบค่า Trigger (${evt.trigger_type}) • สถานะในเตียง: ${
-                        evt.edge_metrics.band_detected ? "พบเด็กทารก" : "ควรตรวจสอบเตียง!"
-                      } • Motion Score: ${evt.edge_metrics.motion_score.toFixed(1)}`}
+                <span className="event-summary">
+                  <strong>{alertTitle(event)}</strong>
+                  <span>
+                    <time dateTime={event.created_at}>{time}</time> · {label}
+                  </span>
+                </span>
+                <ChevronDown className="chevron" aria-hidden="true" />
+              </summary>
+              <div className="event-detail">
+                {analysis?.title_th && <p className="event-result">{analysis.title_th}</p>}
+                <p>
+                  {analysis?.reason_hypothesis_th || (petCover
+                    ? "พบผ้าทับบริเวณที่ติดตามน้องหมา"
+                    : event.trigger_type === "CRY" ? "ผลประเมินเบื้องต้นจากลักษณะของเสียง" : label)}
                 </p>
-                {ai?.recommended_action_th && (
-                  <div className="mt-2 text-xs text-indigo-300 bg-indigo-950/40 border border-indigo-500/20 rounded-lg px-2.5 py-1.5">
-                    💡 <strong>คำแนะนำ:</strong> {ai.recommended_action_th}
-                  </div>
+                {analysis?.recommended_action_th && <p>{analysis.recommended_action_th}</p>}
+                {localMedia?.startsWith("/media/") && (
+                  <a className="text-action" href={edgeBaseUrl.replace(/\/$/, "") + localMedia} target="_blank" rel="noreferrer">
+                    {video ? "ดูคลิป" : "ดูภาพเหตุการณ์"}
+                  </a>
                 )}
               </div>
-
-              <div className="mt-2.5 pt-2 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400">
-                <div className="flex items-center gap-3">
-                  <span>
-                    👶 Baby:{" "}
-                    {evt.edge_metrics.band_detected ? "✅ Infant" : "⚠️ Check Crib"}
-                  </span>
-                  <span>
-                    🏃 Motion: {evt.edge_metrics.motion_score.toFixed(1)}
-                  </span>
-                  <span>
-                    🔊 Cry Prob: {(evt.edge_metrics.yamnet_cry_prob * 100).toFixed(0)}%
-                  </span>
-                </div>
-                <span className="font-mono text-[10px] text-slate-500">
-                  ID: {evt.event_id}
-                </span>
-              </div>
-            </div>
+            </details>
           );
         })}
+        {!visibleAlerts.length && <p className="section-caption">ยังไม่มีเหตุการณ์</p>}
       </div>
-    </div>
+      {hasOlder && (
+        <button type="button" className="text-action history-toggle" aria-controls={historyId}
+          aria-expanded={showOlder} onClick={() => setShowOlder(!showOlder)} lang="en">
+          {showOlder ? "See less" : "See more"} <ChevronDown aria-hidden="true" />
+        </button>
+      )}
+    </section>
   );
-};
-
+}

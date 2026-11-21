@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import sys
+from unittest.mock import Mock
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "cloud" / "analyzer-service" / "src"))
@@ -98,4 +99,41 @@ def test_cloudevent_skips_thumbnail_when_video_present() -> None:
     }
     res = svc.handle_gcs_cloudevent(cloudevent)
     assert res["status"] == "skipped_thumbnail_for_video_event"
+
+
+def test_legacy_periodic_events_skip_analysis_and_notifications() -> None:
+    analyzer = Mock(spec=GeminiSleepAnalyzer)
+    notifier = Mock(spec=CloudNotifier)
+    svc = System2AnalyzerService(analyzer=analyzer, notifier=notifier)
+    event_doc = {"event_id": "old_periodic", "baby_id": "baby_1", "trigger_type": "PERIODIC_CHECK"}
+
+    gcs_result = svc.handle_gcs_cloudevent({
+        "data": {"name": "events/baby_1/old_periodic_thumb.jpg", "metadata": event_doc},
+    })
+    local_result = svc.handle_local_webhook({"event_doc": event_doc})
+
+    assert gcs_result["status"] == "skipped_periodic_check"
+    assert local_result["status"] == "skipped_periodic_check"
+    analyzer.analyze_event.assert_not_called()
+    notifier.finalize_event.assert_not_called()
+
+
+def test_pet_cover_warning_remains_unconfirmed_without_video_analysis(tmp_path: Path) -> None:
+    svc = System2AnalyzerService(
+        analyzer=GeminiSleepAnalyzer(project_id=""),
+        notifier=CloudNotifier(project_id="", local_events_dir=tmp_path),
+    )
+    doc = {
+        "event_id": "cover_test",
+        "baby_id": "baby_1",
+        "subject_mode": "BABY",
+        "trigger_type": "BAND_ROLLOVER",
+        "edge_metrics": {"band_detected": False, "face_cover_suspected": True},
+    }
+    result = svc.handle_local_webhook({"event_doc": doc})
+
+    assert result["safety_status"] == "WARNING"
+    assert result["ai_analysis"]["posture"] == "UNKNOWN"
+    assert result["ai_analysis"]["face_covered"] is False
+    assert "สงสัยว่าผ้าปิดหน้าน้องหมา" in result["ai_analysis"]["title_th"]
 

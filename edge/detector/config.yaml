@@ -5,10 +5,6 @@ global:
   # or "PET_TEST" when testing with a pet.
   subject_mode: "BABY"
 
-  # Send a high-resolution snapshot every 5 minutes (300s) even when sleeping peacefully
-  # so System 2 can verify safe sleep posture & update sleep duration continuously.
-  periodic_snapshot_interval_sec: 300
-
   # Cooldown (seconds) between repeated alerts of the same category
   cooldowns:
     CRY: 30
@@ -26,6 +22,8 @@ babies:
     name: "แฝด A (TP260 Camera)"
     enabled: true
     camera_id: "cam_crib_1"
+    # Use the yellow blanket profile when this camera has visually tracked a pet.
+    pet_cover_detection: true
     # Pulls through go2rtc RTSP relay (or HTTP snapshot fallback for mock-camera)
     video_source_url: "rtsp://go2rtc:8554/baby_1_sub"
     snapshot_url: "http://go2rtc:1984/api/frame.jpeg?src=baby_1_sub"

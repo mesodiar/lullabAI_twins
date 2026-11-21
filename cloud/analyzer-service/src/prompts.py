@@ -59,7 +59,10 @@ def build_system_instruction(subject_mode: str = "BABY") -> str:
             "ขณะนี้อยู่ในโหมดทดสอบภาคสนาม (PET_TEST mode) โดยไม่จำเป็นต้องใช้แผ่นพันตัว (Markerless Vision)\n"
             "หน้าที่ของคุณ:\n"
             "1. ตรวจสอบว่าพบตัวเด็กหรือสัตว์เลี้ยงอยู่ในกรอบเตียงและเห็นช่วงอก/ลำตัวชัดเจนหรือไม่ (`band_visible_and_secure`)\n"
-            "2. ประเมินท่านอน (`posture`), ดูว่าใบหน้า/จมูกถูกผ้าคลุมหรือไม่ (`face_covered`)\n"
+            "2. ประเมินท่านอน (`posture`) และดูว่าใบหน้า จมูก หรือปากถูกผ้าปิดหรือไม่ (`face_covered`) "
+            "แยกสุนัขนอนหมอบปกติที่เห็นจมูกและปากออกจากกรณีหน้ากดกับพื้นหรือถูกผ้าปิด "
+            "ท่าหมอบอย่างเดียวไม่ใช่เหตุฉุกเฉิน ถ้าเห็นสิ่งปิดใบหน้าหรือเห็นหน้ากดจนจมูกและปากถูกบัง ให้รายงานความเสี่ยง "
+            "หากมุมกล้องไม่พอ ให้รายงานข้อจำกัดและใช้ UNKNOWN เมื่อระบุท่าทางไม่ได้\n"
             "3. วิเคราะห์เสียงร้อง/เสียงคราง ร่วมกับค่า Telemetry จาก Edge (เช่น Breathing RPM และ YAMNet score)\n"
             "4. สรุปผลเป็นภาษาไทยที่กระชับ ชัดเจน สำหรับแจ้งเตือนบนมือถือพ่อแม่"
         )
@@ -85,6 +88,12 @@ def build_event_prompt(metadata: dict[str, Any]) -> str:
     breathing_rpm = metadata.get("breathing_rpm", "N/A")
     cry_prob = metadata.get("yamnet_cry_prob", "0.0")
     motion_score = metadata.get("motion_score", "0.0")
+    cover_hint = ""
+    if str(metadata.get("face_cover_suspected", False)).lower() == "true":
+        cover_hint = (
+            "- System 1 สงสัยว่าผ้าทับตำแหน่งของน้องหมา ตรวจใบหน้าและจมูกจากหลายเฟรม "
+            "และตรวจว่าผ้าอยู่บนตัวน้องหรือวางอยู่ข้าง ๆ\n"
+        )
 
     return (
         f"ข้อมูลจาก Edge Node (System 1 Reflex):\n"
@@ -94,5 +103,6 @@ def build_event_prompt(metadata: dict[str, Any]) -> str:
         f"- อัตราการหายใจจาก Chest Optical Flow: {breathing_rpm} ครั้ง/นาที (RPM)\n"
         f"- ความน่าจะเป็นเสียงร้อง (YAMNet/Harmonic): {cry_prob}\n"
         f"- คะแนนการเคลื่อนไหว (Motion Score): {motion_score}\n\n"
+        f"{cover_hint}"
         "กรุณาวิเคราะห์ภาพ/วิดีโอที่แนบมานี้โดยไม่จำเป็นต้องมีแผ่นพันตัว และส่งคืนผลลัพธ์ตามโครงสร้าง SafetyAndSleepAnalysis"
     )

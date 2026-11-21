@@ -15,7 +15,6 @@ FAST_PATH_TITLES_TH = {
     "BAND_ROLLOVER": "⚠️ ตรวจพบความเสี่ยงพลิกคว่ำ/หน้าถูกปิดบัง — กำลังตรวจสอบด่วน!",
     "BREATHING_ANOMALY": "⚠️ จังหวะการขยับหน้าอกหายใจผิดปกติ — กำลังตรวจสอบด่วน!",
     "MOTION": "👀 น้องขยับตัวแรงในเตียง — กำลังวิเคราะห์ภาพ...",
-    "PERIODIC_CHECK": "🔄 อัปเดตสถานะการนอนตามรอบปกติ",
 }
 
 
@@ -88,14 +87,17 @@ class CloudSyncClient:
                 merge=True,
             )
 
-        # 3. Fire Stage-1 Fast-Path FCM Web Push (skip silent periodic checks)
-        if trigger_type != "PERIODIC_CHECK" and self._firebase_initialized:
+        # 3. Fire Stage-1 Fast-Path FCM Web Push
+        if self._firebase_initialized:
             try:
                 from firebase_admin import messaging  # type: ignore[import-not-found]
 
                 title = FAST_PATH_TITLES_TH.get(trigger_type, "🔔 แจ้งเตือนจาก LullabAI")
                 subj = metrics.get("subject_type", "BABY")
                 body = f"[{baby_id}] ตรวจพบเหตุการณ์ ({trigger_type}, {subj}) • รอผลตรวจละเอียดจาก Gemini AI สักครู่..."
+                if trigger_type == "BAND_ROLLOVER" and metrics.get("face_cover_suspected"):
+                    title = "⚠️ สงสัยว่าผ้าปิดหน้าน้องหมา"
+                    body = f"[{baby_id}] พบผ้าทับบริเวณที่ติดตามน้องหมา กรุณาเปิดดูกล้อง"
 
                 msg = messaging.Message(
                     topic=self.fcm_topic,
@@ -143,6 +145,8 @@ class CloudSyncClient:
             "subject_mode": str(event_doc["subject_mode"]),
             "trigger_type": str(event_doc["trigger_type"]),
             "band_detected": str(metrics.get("band_detected", False)),
+            "subject_type": str(metrics.get("subject_type", "")),
+            "face_cover_suspected": str(metrics.get("face_cover_suspected", False)),
             "breathing_rpm": str(metrics.get("breathing_rpm") or ""),
             "yamnet_cry_prob": str(metrics.get("yamnet_cry_prob", 0.0)),
             "motion_score": str(metrics.get("motion_score", 0.0)),

@@ -12,10 +12,7 @@ COPY detector/pyproject.toml /app/pyproject.toml
 RUN pip install --no-cache-dir \
     numpy \
     opencv-python-headless \
-    PyYAML \
-    google-cloud-storage \
-    google-cloud-firestore \
-    firebase-admin
+    PyYAML
 
 COPY detector/config.yaml /app/config.yaml
 COPY detector/src /app/src

@@ -15,6 +15,11 @@ downloads/
 eggs/
 .eggs/
 lib/
+!/web/src/lib/
+/web/src/lib/*
+!/web/src/lib/types.ts
+!/web/src/lib/webrtc.ts
+/edge/local_events/
 lib64/
 parts/
 sdist/

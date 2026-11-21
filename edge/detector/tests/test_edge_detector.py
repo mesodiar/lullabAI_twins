@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import importlib.util
+import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -14,8 +17,10 @@ sys.path.insert(0, str(ROOT / "edge" / "mock-camera"))
 from audio_cry import AudioCryDetector  # noqa: E402
 from breathing_band import BreathingBandTracker  # noqa: E402
 from cv_compat import cv2  # noqa: E402
+from local_events import LocalEventStore  # noqa: E402
 from mock_streamer import MockCameraState  # noqa: E402
 from motion import MotionDetector  # noqa: E402
+from pet_cover import PetCoverDetector  # noqa: E402
 
 
 SAMPLE_IMAGE = ROOT / "edge" / "assets" / "sample_baby_band.jpg"
@@ -111,6 +116,126 @@ def test_pet_box_follows_consecutive_frames_and_clears_when_dog_leaves() -> None
     assert first.band_bbox is not None and second.band_bbox is not None
     assert first.band_bbox[0] + first.band_bbox[2] >= 1280 * 0.90
     assert second.band_bbox[1] > first.band_bbox[1] + 100
+
+
+def test_idle_edge_does_not_emit_periodic_events_with_legacy_config(monkeypatch) -> None:
+    spec = importlib.util.spec_from_file_location("edge_main", ROOT / "edge/detector/src/main.py")
+    assert spec is not None and spec.loader is not None
+    edge_main = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(edge_main)
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(edge_main, "time", SimpleNamespace(time=lambda: clock.now))
+    pipeline = edge_main.BabyMonitorPipeline(
+        {"baby_id": "test", "camera_id": "test", "video_source_url": ""},
+        {"subject_mode": "BABY", "periodic_snapshot_interval_sec": 300},
+        SimpleNamespace(),
+    )
+    empty = cv2.resize(cv2.imread(str(SAMPLE_TP260_PLAYPEN_EMPTY)), (640, 360))
+    assert pipeline.step_once(empty)["triggered"] is None
+
+    clock.now += 600
+    assert pipeline.step_once(empty)["triggered"] is None
+
+    pipeline._latest_audio = edge_main.AudioDetectionResult(0.9, "Baby cry", 0.1, True)
+    assert pipeline.step_once(empty)["triggered"] == "CRY"
+
+
+def test_local_trigger_persists_history_and_snapshot_without_cloud(tmp_path, monkeypatch) -> None:
+    spec = importlib.util.spec_from_file_location("edge_main", ROOT / "edge/detector/src/main.py")
+    assert spec is not None and spec.loader is not None
+    edge_main = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(edge_main)
+    store = LocalEventStore(tmp_path)
+    pipeline = edge_main.BabyMonitorPipeline(
+        {"baby_id": "baby_1", "camera_id": "test", "video_source_url": ""},
+        {"post_roll_seconds": 0},
+        store,
+    )
+    monkeypatch.setattr(pipeline.reader, "get_buffered_frames", lambda **kwargs: [np.zeros((32, 32, 3), dtype=np.uint8)])
+
+    def export_snapshot(directory, event_id, frames):
+        snapshot = directory / f"{event_id}_thumb.jpg"
+        snapshot.write_bytes(b"test snapshot")
+        return directory / f"{event_id}.mp4", snapshot
+
+    monkeypatch.setattr(pipeline.reader, "export_clip_and_snapshot", export_snapshot)
+    event = pipeline.handle_triggered_event("CRY", {"yamnet_cry_prob": 0.7})
+
+    assert event["status"] == "EDGE_DETECTED"
+    assert event["ai_analysis"] is None
+    assert LocalEventStore(tmp_path).recent("baby_1") == [event]
+    assert LocalEventStore(tmp_path).recent("baby_2") == []
+    snapshot = event["media"]["local_snapshot_path"].removeprefix("/media/")
+    assert store.media_path(snapshot).read_bytes() == b"test snapshot"
+    assert store.media_path("../" + snapshot) is None
+
+    legacy = {**event, "event_id": "evt_9999999998_000001", "status": "PENDING_AI"}
+    periodic = {**legacy, "event_id": "evt_9999999999_000002", "trigger_type": "PERIODIC_CHECK"}
+    store.save(legacy)
+    store.save(periodic)
+    reopened = store.recent("baby_1")
+    assert [item["event_id"] for item in reopened] == [legacy["event_id"], event["event_id"]]
+    assert reopened[0]["status"] == "EDGE_DETECTED"
+    assert json.loads((tmp_path / f"{legacy['event_id']}.json").read_text())["status"] == "PENDING_AI"
+
+
+def test_cover_alert_requires_a_tracked_pet_and_fires_once_per_episode(monkeypatch) -> None:
+    spec = importlib.util.spec_from_file_location("edge_main", ROOT / "edge/detector/src/main.py")
+    assert spec is not None and spec.loader is not None
+    edge_main = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(edge_main)
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(edge_main, "time", SimpleNamespace(time=lambda: clock.now, monotonic=lambda: clock.now))
+    monkeypatch.delenv("SUBJECT_MODE", raising=False)
+
+    pipeline = edge_main.BabyMonitorPipeline(
+        {"baby_id": "test", "camera_id": "test", "video_source_url": "", "pet_cover_detection": True},
+        {"subject_mode": "BABY", "cooldowns": {"BAND_ROLLOVER": 25}},
+        SimpleNamespace(),
+    )
+    pet = cv2.resize(cv2.imread(str(SAMPLE_TP260_PLAYPEN_DOG2)), (640, 360))
+    empty = cv2.resize(cv2.imread(str(SAMPLE_TP260_PLAYPEN_EMPTY)), (640, 360))
+    bbox = BreathingBandTracker().process_frame(pet).band_bbox
+    assert bbox is not None
+    x, y, width, height = bbox
+    covered = empty.copy()
+    covered[y : y + height, x : x + width] = (110, 175, 208)
+    silence = np.zeros(16000, dtype=np.float32)
+
+    def step(frame, elapsed):
+        clock.now = 100.0 + elapsed
+        return pipeline.step_once(frame, audio_waveform=silence)
+
+    for elapsed in (0, 0.5, 1.1):
+        assert not step(covered, elapsed)["edge_metrics"]["face_cover_suspected"]
+
+    assert step(pet, 1.2)["edge_metrics"]["subject_type"] == "PET"
+    for elapsed in (1.3, 1.6, 2.0):
+        assert step(covered, elapsed)["triggered"] != "BAND_ROLLOVER"
+    status = step(covered, 2.4)
+    assert status["triggered"] == "BAND_ROLLOVER"
+    assert status["edge_metrics"]["face_cover_suspected"]
+    assert not status["edge_metrics"]["band_detected"]
+
+    for elapsed in range(3, 30):
+        status = step(covered, elapsed)
+        assert status["triggered"] != "BAND_ROLLOVER"
+        assert status["edge_metrics"]["face_cover_suspected"]
+
+    step(empty, 30)
+    assert not step(empty, 30.6)["edge_metrics"]["face_cover_suspected"]
+    step(pet, 31)
+    step(covered, 31.1)
+    step(covered, 31.5)
+    assert step(covered, 32.2)["triggered"] == "BAND_ROLLOVER"
+
+
+def test_cover_detector_rejects_a_blanket_beside_the_pet() -> None:
+    detector = PetCoverDetector()
+    frame = np.full((360, 640, 3), 212, dtype=np.uint8)
+    frame[110:270, 330:490] = (110, 175, 208)
+    for timestamp in (0.0, 0.5, 1.2):
+        assert not detector.process_frame(frame, [160, 110, 160, 160], timestamp)
 
 
 def test_detect_infant_on_uploaded_sample_image() -> None:

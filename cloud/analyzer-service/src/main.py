@@ -32,11 +32,15 @@ class System2AnalyzerService:
         content_type = data.get("contentType", "video/mp4")
         metadata = data.get("metadata") or {}
 
-        # Avoid duplicate execution: if both `_thumb.jpg` and `.mp4` are uploaded for a clip event,
-        # only trigger AI analysis on `.mp4` (or on `_thumb.jpg` when `trigger_type == PERIODIC_CHECK`).
-        trigger_type = str(metadata.get("trigger_type", "PERIODIC_CHECK")).upper()
-        if object_name.endswith("_thumb.jpg") and trigger_type != "PERIODIC_CHECK":
+        trigger_type = str(metadata.get("trigger_type") or "").upper()
+        if trigger_type == "PERIODIC_CHECK":
+            return {"status": "skipped_periodic_check", "object": object_name}
+
+        # Each event uploads both a preview and a clip. Analyze the clip once.
+        if object_name.endswith("_thumb.jpg"):
             return {"status": "skipped_thumbnail_for_video_event", "object": object_name}
+        if not trigger_type:
+            return {"status": "skipped_missing_trigger", "object": object_name}
 
         event_id = metadata.get("event_id") or Path(object_name).stem.replace("_thumb", "")
         baby_id = metadata.get("baby_id", "baby_1")
@@ -66,7 +70,9 @@ class System2AnalyzerService:
         event_doc = body["event_doc"]
         event_id = event_doc["event_id"]
         baby_id = event_doc["baby_id"]
-        trigger_type = event_doc["trigger_type"]
+        trigger_type = str(event_doc["trigger_type"]).upper()
+        if trigger_type == "PERIODIC_CHECK":
+            return {"status": "skipped_periodic_check", "event_id": event_id}
         metrics = event_doc.get("edge_metrics", {})
 
         metadata = {
@@ -76,6 +82,8 @@ class System2AnalyzerService:
             "subject_mode": event_doc.get("subject_mode", "PET_TEST"),
             "trigger_type": trigger_type,
             "band_detected": str(metrics.get("band_detected", True)),
+            "subject_type": str(metrics.get("subject_type", "")),
+            "face_cover_suspected": str(metrics.get("face_cover_suspected", False)),
             "breathing_rpm": str(metrics.get("breathing_rpm") or ""),
             "yamnet_cry_prob": str(metrics.get("yamnet_cry_prob", 0.0)),
             "motion_score": str(metrics.get("motion_score", 0.0)),

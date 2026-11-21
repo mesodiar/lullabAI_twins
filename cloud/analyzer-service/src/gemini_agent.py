@@ -49,6 +49,9 @@ class GeminiSleepAnalyzer:
                 from google.genai import types  # type: ignore[import-not-found]
 
                 subject_mode = str(metadata.get("subject_mode", "BABY"))
+                face_cover_suspected = str(metadata.get("face_cover_suspected", False)).lower() == "true"
+                if metadata.get("subject_type") == "PET" or face_cover_suspected:
+                    subject_mode = "PET_TEST"
                 sys_instruction = build_system_instruction(subject_mode)
                 prompt_text = build_event_prompt(metadata)
 
@@ -82,10 +85,24 @@ class GeminiSleepAnalyzer:
     @staticmethod
     def _heuristic_fallback(metadata: dict[str, Any]) -> SafetyAndSleepAnalysis:
         """Deterministic fallback for local testing when Vertex AI credentials are not active."""
-        trigger = str(metadata.get("trigger_type", "PERIODIC_CHECK")).upper()
+        trigger = str(metadata.get("trigger_type") or "").upper()
         band_detected = str(metadata.get("band_detected", "True")).lower() == "true"
         rpm_raw = metadata.get("breathing_rpm")
         rpm = float(rpm_raw) if rpm_raw not in (None, "", "None") else None
+
+        if str(metadata.get("face_cover_suspected", False)).lower() == "true":
+            return SafetyAndSleepAnalysis(
+                is_false_alarm=False,
+                safety_alert=False,
+                posture="UNKNOWN",
+                face_covered=False,
+                band_visible_and_secure=False,
+                sleep_state="AWAKE_CALM",
+                urgency="HIGH",
+                title_th="⚠️ สงสัยว่าผ้าปิดหน้าน้องหมา",
+                reason_hypothesis_th="System 1 พบผ้าทับบริเวณที่ติดตามน้องหมา ผลการตรวจภาพยังไม่ยืนยัน",
+                recommended_action_th="กรุณาเปิดดูกล้องหรือตรวจดูน้องโดยตรง",
+            )
 
         if trigger == "BAND_ROLLOVER" or not band_detected:
             return SafetyAndSleepAnalysis(
@@ -154,20 +171,16 @@ class GeminiSleepAnalyzer:
                 recommended_action_th="ยังไม่ต้องทำอะไร รอดูว่าน้องจะหลับต่อเองหรือไม่",
             )
 
-        # PERIODIC_CHECK (every 5 minutes)
         return SafetyAndSleepAnalysis(
-            is_false_alarm=False,
+            is_false_alarm=True,
             safety_alert=False,
-            posture="SUPINE",
+            posture="UNKNOWN",
             face_covered=False,
-            band_visible_and_secure=True,
-            sleep_state="ASLEEP_DEEP",
+            band_visible_and_secure=band_detected,
+            sleep_state="AWAKE_CALM",
             urgency="LOW",
-            title_th="😴 น้องนอนหลับสบายและปลอดภัยดี",
-            reason_hypothesis_th=(
-                f"ตรวจเช็คตามรอบ 5 นาที: นอนหงายปกติ ไม่มีผ้าคลุมหน้า "
-                f"เห็นลายแผ่นพันตัวชัดเจน การหายใจสม่ำเสมอ ({rpm or 32:.0f} ครั้ง/นาที)"
-            ),
-            recommended_action_th="ปลอดภัยดี ไม่ต้องดำเนินการใดๆ",
+            title_th="ผลตรวจสอบไม่ชัดเจน",
+            reason_hypothesis_th="ข้อมูลเหตุการณ์ไม่เพียงพอที่จะสรุปผล",
+            recommended_action_th="เปิดดูกล้องเพื่อดูสถานะล่าสุด",
         )
 

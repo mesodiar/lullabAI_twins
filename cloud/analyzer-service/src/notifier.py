@@ -94,11 +94,7 @@ class CloudNotifier:
             )
 
         # 3. Send Stage-2 FCM Notification (replaces Stage-1 notification using same `tag: event_id`)
-        #    Note: Silent 5-minute PERIODIC_CHECK only alerts the parent if `safety_alert` is True!
-        should_notify = (
-            not analysis.is_false_alarm
-            and (trigger_type != "PERIODIC_CHECK" or analysis.safety_alert)
-        )
+        should_notify = not analysis.is_false_alarm and trigger_type != "PERIODIC_CHECK"
         if should_notify and self._firebase_initialized:
             try:
                 from firebase_admin import messaging  # type: ignore[import-not-found]

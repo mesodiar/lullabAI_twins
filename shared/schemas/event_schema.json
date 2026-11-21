@@ -43,7 +43,7 @@
     },
     "status": {
       "type": "string",
-      "enum": ["PENDING_AI", "ANALYZED", "FALSE_ALARM_SUPPRESSED"]
+      "enum": ["EDGE_DETECTED", "PENDING_AI", "ANALYZED", "FALSE_ALARM_SUPPRESSED"]
     },
     "created_at": {
       "type": "string",
@@ -78,6 +78,10 @@
           "type": "boolean",
           "description": "Whether the high-contrast Nanit-style geometric breathing band pattern is visible."
         },
+        "face_cover_suspected": {
+          "type": "boolean",
+          "description": "Whether System 1 suspects the configured blanket is obscuring a tracked pet."
+        },
         "band_confidence": {
           "type": "number",
           "minimum": 0.0,
@@ -102,7 +106,9 @@
         "gcs_video_uri": { "type": ["string", "null"] },
         "gcs_snapshot_uri": { "type": ["string", "null"] },
         "signed_video_url": { "type": ["string", "null"] },
-        "signed_snapshot_url": { "type": ["string", "null"] }
+        "signed_snapshot_url": { "type": ["string", "null"] },
+        "local_video_path": { "type": "string" },
+        "local_snapshot_path": { "type": "string" }
       }
     },
     "ai_analysis": {
