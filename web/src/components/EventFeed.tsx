@@ -37,7 +37,11 @@ export function EventFeed({ events, edgeBaseUrl }: EventFeedProps) {
           const petCover = isPetCoverAlert(event);
           const urgent = petCover || event.trigger_type === "BAND_ROLLOVER" ||
             event.trigger_type === "BREATHING_ANOMALY" || analysis?.safety_alert || analysis?.urgency === "CRITICAL";
-          const label = event.simulated ? "Simulated" : urgent ? "Check now" : analysis ? "Reviewed" : "Detected locally";
+          const label = event.simulated ? "Simulated" : urgent ? "Check now" :
+            event.cloud_review === "REVIEWED" ? "Reviewed by Gemini" : analysis ? "Reviewed" : "Detected locally";
+          const soundDescription = event.edge_metrics.audio_kind === "DOG_VOCALIZATION"
+            ? "The detector heard a sound that resembled a dog vocalization."
+            : "The detector heard a sound that resembled crying.";
           const Icon = urgent ? TriangleAlert : event.trigger_type === "CRY" ? AudioLines : Activity;
           const created = new Date(event.created_at);
           const time = Number.isNaN(created.getTime())
@@ -62,17 +66,22 @@ export function EventFeed({ events, edgeBaseUrl }: EventFeedProps) {
                 <ChevronDown className="chevron" aria-hidden="true" />
               </summary>
               <div className="event-detail">
+                {event.cloud_review === "PENDING" && <p>Gemini review pending.</p>}
+                {event.cloud_review === "UNAVAILABLE" && <p>Gemini review unavailable.</p>}
                 {analysis?.title_th && <p className="event-result" lang="th">{analysis.title_th}</p>}
                 <p lang={analysis?.reason_hypothesis_th ? "th" : undefined}>
                   {analysis?.reason_hypothesis_th || (petCover
                     ? "The detector spotted what may be a blanket over the dog's face."
-                    : event.trigger_type === "CRY" ? "The detector heard a sound that resembled crying." : label)}
+                    : event.trigger_type === "CRY" ? soundDescription : label)}
                 </p>
                 {analysis?.recommended_action_th && <p lang="th">{analysis.recommended_action_th}</p>}
                 {localMedia?.startsWith("/media/") && (
                   <a className="text-action" href={edgeBaseUrl.replace(/\/$/, "") + localMedia} target="_blank" rel="noreferrer">
                     {video ? "View clip" : "View snapshot"}
                   </a>
+                )}
+                {video && event.media?.local_video_has_audio !== true && (
+                  <p>Audio was not recorded for this clip.</p>
                 )}
               </div>
             </details>

@@ -1,5 +1,6 @@
 import { Bell, ChevronDown, MoonStar, Settings } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { disableBackgroundPush, enableBackgroundPush, prepareBackgroundPush, type BackgroundPushSetup } from "./backgroundPush";
 import "./dashboard.css";
 import { EventFeed } from "./components/EventFeed";
 import { LivePlayer } from "./components/LivePlayer";
@@ -8,11 +9,12 @@ import { isImportantAlert, notifyLocal, requestLocalNotifications } from "./loca
 import type { BabyProfile, EdgeMetrics, LullabAIEvent } from "./lib/types";
 
 const LOCAL_HOST = window.location.hostname;
-const GO2RTC_URL = import.meta.env.VITE_GO2RTC_URL || `http://${LOCAL_HOST}:1984`;
+const USE_HTTPS_PROXY = window.location.protocol === "https:";
+const GO2RTC_URL = import.meta.env.VITE_GO2RTC_URL || (USE_HTTPS_PROXY ? "/go2rtc" : `http://${LOCAL_HOST}:1984`);
 const EDGE_BASE_URL =
-  import.meta.env.VITE_EDGE_BASE_URL || `http://${LOCAL_HOST}:8095`;
+  import.meta.env.VITE_EDGE_BASE_URL || (USE_HTTPS_PROXY ? "/edge" : `http://${LOCAL_HOST}:8095`);
 const MOCK_CAMERA_URL =
-  import.meta.env.VITE_MOCK_CAMERA_URL || `http://${LOCAL_HOST}:8090`;
+  import.meta.env.VITE_MOCK_CAMERA_URL || (USE_HTTPS_PROXY ? "/mock" : `http://${LOCAL_HOST}:8090`);
 const EDGE_STATUS_URL =
   import.meta.env.VITE_EDGE_STATUS_URL || `${EDGE_BASE_URL}/status`;
 
@@ -23,7 +25,11 @@ const CRY_CLIP_ID = "n-R3LzEtumg";
 
 type BedId = typeof BEDS[number];
 type SimulatedTrigger = "BAND_ROLLOVER" | "MOTION";
-type DashboardProfile = BabyProfile & { cameraConfigured?: boolean; petCoverSuspected?: boolean };
+type DashboardProfile = BabyProfile & {
+  cameraConfigured?: boolean;
+  petCoverSuspected?: boolean;
+  audioClassifierReady?: boolean;
+};
 
 const initialBabies: Record<BedId, DashboardProfile> = {
   baby_1: initialProfile("baby_1", "cam_crib_1"),
@@ -56,7 +62,9 @@ interface EdgeStatus {
 }
 
 export function App() {
-  const [selectedBabyId, setSelectedBabyId] = useState<BedId>("baby_1");
+  const [selectedBabyId, setSelectedBabyId] = useState<BedId>(() =>
+    new URLSearchParams(window.location.search).get("bed") === "baby_2" ? "baby_2" : "baby_1"
+  );
   const [babies, setBabies] = useState<Record<string, DashboardProfile>>(initialBabies);
   const [events, setEvents] = useState<LullabAIEvent[]>([]);
   const [notificationStatus, setNotificationStatus] = useState(() =>
@@ -64,6 +72,10 @@ export function App() {
       ? "Notifications are on while this page is open."
       : "Get alerts while this page is open."
   );
+  const [backgroundPush, setBackgroundPush] = useState<BackgroundPushSetup | "unsupported" | null>(null);
+  const [setupCode, setSetupCode] = useState("");
+  const [changingNotifications, setChangingNotifications] = useState(false);
+  const hasBackgroundPush = useRef(false);
   const [useMock, setUseMock] = useState(false);
   const [showDetection, setShowDetection] = useState(true);
   const [connection, setConnection] = useState("");
@@ -88,8 +100,22 @@ export function App() {
   const monitoring = Boolean(simulatedTrigger || (!useMock && activeBaby.edge_online && activeBaby.last_heartbeat_at));
   const heardCrying = cryTest && events.some((event) =>
     event.baby_id === cryTest.bed && event.trigger_type === "CRY" && !event.simulated &&
+    event.edge_metrics.audio_kind === "BABY_CRY" &&
     isImportantAlert(event) && Date.parse(event.created_at) >= cryTest.startedAt
   );
+
+  useEffect(() => {
+    let active = true;
+    void prepareBackgroundPush().then((setup) => {
+      if (!active) return;
+      setBackgroundPush(setup);
+      if (setup && setup !== "unsupported" && setup.registered) {
+        hasBackgroundPush.current = true;
+        setNotificationStatus("Background alerts are on for this device.");
+      }
+    }).catch(() => {});
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -115,6 +141,7 @@ export function App() {
             updates[bed] = {
               ...current,
               cameraConfigured: configured,
+              audioClassifierReady: metrics.audio_classifier_ready,
               band_detected: monitored,
               band_bbox_pct: metrics.band_bbox_pct ?? null,
               subject_type: subject,
@@ -150,7 +177,7 @@ export function App() {
           const nextEventIds = new Set(received.map((event) => event.event_id));
           if (seenEventIds) {
             for (const event of received) {
-              if (!seenEventIds.has(event.event_id) && isImportantAlert(event)) {
+              if (!hasBackgroundPush.current && !seenEventIds.has(event.event_id) && isImportantAlert(event)) {
                 void notifyLocal(event, BED_LABELS[event.baby_id as BedId] ?? event.baby_id);
               }
             }
@@ -184,10 +211,27 @@ export function App() {
   }, []);
 
   const handleEnableNotifications = async () => {
+    setChangingNotifications(true);
     try {
-      setNotificationStatus(await requestLocalNotifications());
-    } catch {
-      setNotificationStatus("Could not enable notifications.");
+      if (backgroundPush && backgroundPush !== "unsupported") {
+        const updated = backgroundPush.registered
+          ? await disableBackgroundPush(backgroundPush)
+          : await enableBackgroundPush(backgroundPush, setupCode.trim());
+        hasBackgroundPush.current = updated.registered;
+        setBackgroundPush(updated);
+        setSetupCode("");
+        setNotificationStatus(updated.registered
+          ? "Background alerts are on for this device."
+          : "Background alerts are off for this device.");
+      } else {
+        setNotificationStatus(await requestLocalNotifications());
+      }
+    } catch (error) {
+      setNotificationStatus(error instanceof Error && error.name === "Error"
+        ? error.message
+        : "Could not change notifications. Check your browser permissions.");
+    } finally {
+      setChangingNotifications(false);
     }
   };
 
@@ -299,7 +343,25 @@ export function App() {
               <section className="menu-panel" aria-label="Notifications">
                 <h2>Notifications</h2>
                 <p className="section-caption" role="status">{notificationStatus}</p>
-                <button className="menu-button" type="button" onClick={handleEnableNotifications}>Enable notifications</button>
+                {backgroundPush === "unsupported" && (
+                  <p className="section-caption">For background alerts on iPhone or iPad, add the HTTPS dashboard to your Home Screen and open it from there.</p>
+                )}
+                {backgroundPush && backgroundPush !== "unsupported" && !backgroundPush.registered && (
+                  <label className="push-setup">
+                    Setup code
+                    <input type="password" value={setupCode} onChange={(event) => setSetupCode(event.target.value)} autoComplete="off" />
+                  </label>
+                )}
+                <button
+                  className="menu-button"
+                  type="button"
+                  onClick={handleEnableNotifications}
+                  disabled={changingNotifications || Boolean(backgroundPush && backgroundPush !== "unsupported" && !backgroundPush.registered && !setupCode.trim())}
+                >
+                  {backgroundPush && backgroundPush !== "unsupported"
+                    ? backgroundPush.registered ? "Turn off background alerts" : "Enable background alerts"
+                    : "Enable notifications"}
+                </button>
               </section>
             </details>
             <details className="app-menu" name="dashboard-menu">
@@ -313,6 +375,9 @@ export function App() {
                   <dl>
                     <div><dt>Camera</dt><dd>{activeBaby.camera_id}</dd></div>
                     <div><dt>Stream</dt><dd>{connection}</dd></div>
+                    {monitoring && activeBaby.audioClassifierReady !== undefined && (
+                      <div><dt>Audio classifier</dt><dd>{activeBaby.audioClassifierReady ? "Ready" : "Unavailable"}</dd></div>
+                    )}
                     <div><dt>Motion score</dt><dd>{monitoring ? activeBaby.motion_score?.toFixed(1) ?? "—" : "—"}</dd></div>
                     <div><dt>Clip storage</dt><dd>Local (Edge)</dd></div>
                   </dl>

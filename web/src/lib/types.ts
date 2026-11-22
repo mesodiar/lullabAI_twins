@@ -23,6 +23,8 @@ export type DetectedSubjectType = "BABY" | "PET" | "ADULT" | "NONE";
 export interface EdgeMetrics {
   yamnet_cry_prob: number;
   yamnet_top_label: string;
+  audio_kind?: "BABY_CRY" | "DOG_VOCALIZATION" | null;
+  audio_classifier_ready?: boolean;
   motion_score: number;
   band_detected: boolean;
   band_confidence: number;
@@ -52,6 +54,7 @@ export interface LullabAIEvent {
   subject_mode: SubjectMode;
   trigger_type: TriggerType;
   status: "EDGE_DETECTED" | "PENDING_AI" | "ANALYZED" | "FALSE_ALARM_SUPPRESSED";
+  cloud_review?: "PENDING" | "REVIEWED" | "UNAVAILABLE";
   simulated?: boolean;
   created_at: string;
   analyzed_at: string | null;
@@ -63,6 +66,7 @@ export interface LullabAIEvent {
     signed_snapshot_url?: string | null;
     local_video_path?: string;
     local_snapshot_path?: string;
+    local_video_has_audio?: boolean;
   };
   ai_analysis: AIAnalysis | null;
 }

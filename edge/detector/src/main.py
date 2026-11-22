@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sqlite3
 import tempfile
 import threading
 import time
@@ -21,11 +22,13 @@ import yaml
 
 from audio_cry import AudioCryDetector, AudioDetectionResult
 from breathing_band import BandTrackingResult, BreathingBandTracker
+from cloud_sync import CloudSyncClient
 from cv_compat import cv2
 from local_events import LocalEventStore, RECENT_EVENT_LIMIT
 from motion import MotionDetector, MotionResult
 from pet_cover import PetCoverDetector
 from stream_reader import RingBufferStreamReader
+from web_push import WebPushService, subscription_fields
 
 CV_ERROR = getattr(cv2, "error", RuntimeError)
 
@@ -38,6 +41,8 @@ class BabyMonitorPipeline:
         baby_cfg: dict[str, Any],
         global_cfg: dict[str, Any],
         event_store: LocalEventStore,
+        web_push: WebPushService | None = None,
+        cloud_sync: CloudSyncClient | None = None,
     ) -> None:
         self.baby_id: str = baby_cfg["baby_id"]
         self.camera_id: str = baby_cfg["camera_id"]
@@ -49,6 +54,8 @@ class BabyMonitorPipeline:
             {"CRY": 30.0, "BAND_ROLLOVER": 25.0, "BREATHING_ANOMALY": 25.0, "MOTION": 60.0},
         )
         self.event_store = event_store
+        self.web_push = web_push
+        self.cloud_sync = cloud_sync
 
         thresholds = baby_cfg.get("thresholds", {})
         roi = tuple(baby_cfg.get("crib_roi", [0.10, 0.05, 0.90, 0.95]))
@@ -79,7 +86,6 @@ class BabyMonitorPipeline:
             motion_threshold=float(thresholds.get("motion_score", 4.5)),
         )
         self.audio_detector = AudioCryDetector(
-            subject_mode=self.subject_mode,  # type: ignore[arg-type]
             cry_threshold=float(thresholds.get("cry_prob", 0.55)),
         )
 
@@ -114,9 +120,10 @@ class BabyMonitorPipeline:
 
         for trigger in candidates:
             cooldown = float(self.cooldowns.get(trigger, 30.0))
-            last_time = self._last_alert_at.get(trigger, 0.0)
+            cooldown_key = (audio_res.audio_kind or trigger) if trigger == "CRY" else trigger
+            last_time = self._last_alert_at.get(cooldown_key, 0.0)
             if (now - last_time) >= cooldown:
-                self._last_alert_at[trigger] = now
+                self._last_alert_at[cooldown_key] = now
                 if trigger == "BAND_ROLLOVER" and face_cover_suspected:
                     self._cover_alerted = True
                 return trigger
@@ -156,6 +163,8 @@ class BabyMonitorPipeline:
         metrics = {
             "yamnet_cry_prob": audio_res.cry_prob,
             "yamnet_top_label": audio_res.top_label,
+            "audio_kind": audio_res.audio_kind,
+            "audio_classifier_ready": self.audio_detector.ready,
             "motion_score": motion_res.motion_score,
             "band_detected": band_res.band_detected,
             "band_confidence": band_res.band_confidence,
@@ -203,6 +212,8 @@ class BabyMonitorPipeline:
             self.event_store.save(event_doc)
         except OSError as exc:
             print(f"[Edge:{self.baby_id}] Could not save event {event_id}: {exc}")
+        if self.web_push is not None:
+            self.web_push.submit(event_doc)
 
         deadline = started_at + self.post_roll_seconds
         time.sleep(max(0.0, deadline - time.monotonic()))
@@ -212,28 +223,32 @@ class BabyMonitorPipeline:
             try:
                 # Stage inside the event volume so completed media can be published atomically.
                 with tempfile.TemporaryDirectory(prefix=".capture_", dir=self.event_store.directory) as tmp_dir:
-                    clip_path, snap_path = self.reader.export_clip_and_snapshot(
-                        Path(tmp_dir), event_id=event_id, frames=frames
+                    clip_path, snap_path, audio_path = self.reader.export_clip_and_snapshot(
+                        Path(tmp_dir), event_id=event_id, frames=frames, include_audio=trigger_type == "CRY"
                     )
-                    media = self.event_store.save_media(clip_path, snap_path)
+                    media = self.event_store.save_media(clip_path, snap_path, audio_path)
                     event_doc["media"] = media
                     self.event_store.save(event_doc)
+                    if self.cloud_sync is not None:
+                        self.cloud_sync.enqueue(event_doc)
             except (OSError, ValueError, CV_ERROR) as exc:
                 print(f"[Edge:{self.baby_id}] Could not save media for {event_id}: {exc}")
 
         return event_doc
 
     def _run_audio(self) -> None:
-        # RTSP audio capture blocks while FFmpeg reads a waveform.
         while True:
             started_at = time.monotonic()
-            waveform = self.reader.fetch_audio_waveform(duration_sec=1.5)
+            audio = self.reader.get_buffered_audio(started_at - 1.5, started_at)
+            waveform = audio.astype(np.float32) / 32768.0 if audio is not None else np.empty(0, dtype=np.float32)
             self._latest_audio = self.audio_detector.analyze_waveform(waveform)
-            time.sleep(max(0.0, 1.5 - (time.monotonic() - started_at)))
+            # Overlap reads so a short vocalization can span two reads.
+            time.sleep(max(0.0, 0.75 - (time.monotonic() - started_at)))
 
     def run_forever(self) -> None:
         interval = 1.0 / float(self.fps)
         threading.Thread(target=self.reader.capture_forever, daemon=True).start()
+        threading.Thread(target=self.reader.capture_audio_forever, daemon=True).start()
         threading.Thread(target=self._run_audio, daemon=True).start()
         print(f"[Edge:{self.baby_id}] Started System 1 monitoring loop at {self.fps} FPS (mode={self.subject_mode})")
         while True:
@@ -261,6 +276,8 @@ class BabyMonitorPipeline:
 class EdgeStatusHandler(BaseHTTPRequestHandler):
     pipelines: dict[str, BabyMonitorPipeline] = {}
     event_store: LocalEventStore
+    web_push: WebPushService | None = None
+    cloud_sync: CloudSyncClient | None = None
 
     def log_message(self, format: str, *args) -> None:
         pass
@@ -333,11 +350,74 @@ class EdgeStatusHandler(BaseHTTPRequestHandler):
         self._send_cors_headers()
         self.end_headers()
 
+    def _send_push_json(self, status: int, value: dict[str, Any]) -> None:
+        body = json.dumps(value).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _push_subscription(self, action: str) -> None:
+        service = self.web_push
+        if service is None:
+            self._send_push_json(503, {"error": "Web Push is not configured"})
+            return
+        if action == "enroll" and not service.can_enroll(self.headers.get("X-Setup-Code", "")):
+            self._send_push_json(403, {"error": "Invalid setup code"})
+            return
+        if self.headers.get_content_type() != "application/json":
+            self._send_push_json(415, {"error": "Expected a JSON subscription"})
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 4096:
+                raise ValueError("Invalid subscription length")
+            body = json.loads(self.rfile.read(length))
+            if not isinstance(body, dict):
+                raise ValueError("Invalid subscription")
+            fields = subscription_fields(body)
+        except (ValueError, OSError):
+            self._send_push_json(400, {"error": "Invalid push subscription"})
+            return
+        try:
+            if action == "enroll":
+                service.enroll(fields)
+            elif action == "remove":
+                service.remove(fields)
+            else:
+                self._send_push_json(200, {"registered": service.contains(fields)})
+                return
+        except sqlite3.Error:
+            self._send_push_json(503, {"error": "Subscription storage unavailable"})
+            return
+        self._send_push_json(200, {"ok": True})
+
+    def do_POST(self) -> None:
+        path = urlparse(self.path).path
+        if path == "/push/subscriptions":
+            self._push_subscription("enroll")
+        elif path == "/push/subscription-status":
+            self._push_subscription("status")
+        else:
+            self.send_error(404)
+
+    def do_DELETE(self) -> None:
+        if urlparse(self.path).path == "/push/subscriptions":
+            self._push_subscription("remove")
+        else:
+            self.send_error(404)
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
         qs = parse_qs(parsed.query)
         baby_id = qs.get("baby_id", ["baby_1"])[0]
+
+        if path == "/push/config":
+            self._send_push_json(200, {"publicKey": self.web_push.public_key if self.web_push else None})
+            return
 
         if path.startswith("/media/"):
             self._send_media(path.removeprefix("/media/"))
@@ -352,8 +432,11 @@ class EdgeStatusHandler(BaseHTTPRequestHandler):
             for p in self.pipelines.values():
                 all_events.extend(p.recent_events.copy())
             all_events.sort(key=lambda event: event["created_at"], reverse=True)
+            if self.cloud_sync is not None:
+                all_events = [self.cloud_sync.with_review(event) for event in all_events]
             data = {
                 "status": "ok",
+                "cloud_reviews_enabled": self.cloud_sync is not None,
                 "babies": {bid: p._latest_status for bid, p in self.pipelines.items()},
                 "recent_events": all_events,
             }
@@ -421,12 +504,14 @@ def main() -> None:
 
     global_cfg = cfg.get("global", {})
     event_store = LocalEventStore()
+    web_push = WebPushService.from_env(event_store.directory)
+    cloud_sync = CloudSyncClient.from_env(event_store)
 
     pipelines: dict[str, BabyMonitorPipeline] = {}
     for baby_cfg in cfg.get("babies", []):
         if not baby_cfg.get("enabled", False):
             continue
-        pipeline = BabyMonitorPipeline(baby_cfg, global_cfg, event_store)
+        pipeline = BabyMonitorPipeline(baby_cfg, global_cfg, event_store, web_push, cloud_sync)
         pipeline.recent_events.extend(event_store.recent(pipeline.baby_id))
         pipelines[pipeline.baby_id] = pipeline
         t = threading.Thread(target=pipeline.run_forever, daemon=True)
@@ -434,6 +519,8 @@ def main() -> None:
 
     EdgeStatusHandler.pipelines = pipelines
     EdgeStatusHandler.event_store = event_store
+    EdgeStatusHandler.web_push = web_push
+    EdgeStatusHandler.cloud_sync = cloud_sync
     status_port = int(os.environ.get("EDGE_STATUS_PORT", "8095"))
     server = ThreadingHTTPServer(("0.0.0.0", status_port), EdgeStatusHandler)
     print(f"[EdgeNode] Telemetry server listening on http://0.0.0.0:{status_port}/status")

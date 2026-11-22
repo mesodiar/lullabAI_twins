@@ -1,0 +1,15 @@
+services:
+  edge-detector:
+    environment:
+      LULLABAI_GCP_ENABLED: "1"
+      GCP_PROJECT_ID: "${GCP_PROJECT_ID:-lullabai-twins}"
+      GCP_FIRESTORE_DATABASE: "${GCP_FIRESTORE_DATABASE:-lullabai-events}"
+      GCS_EVENTS_BUCKET: "${GCS_EVENTS_BUCKET:-lullabai-twins-lullabai-events}"
+      GOOGLE_APPLICATION_CREDENTIALS: /run/lullabai-cloud/adc.json
+    volumes:
+      - type: bind
+        source: "${LULLABAI_GCP_ADC_FILE:-./cloud-secrets/adc.json}"
+        target: /run/lullabai-cloud/adc.json
+        read_only: true
+        bind:
+          create_host_path: false

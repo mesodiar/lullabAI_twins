@@ -1,42 +1,20 @@
-"""Audio Cry & Pet Vocalization Detector (System 1 Edge Reflex).
-
-Supports:
-1. YAMNet TFLite (`yamnet.tflite`) when present on the Edge Node.
-2. Built-in Spectral Harmonic Cry/Whimper Detector fallback so the system works out-of-the-box
-   even before downloading TFLite weights.
-3. Both `BABY` mode (`Baby cry, infant cry`, `Crying, sobbing`) and `PET_TEST` mode
-   (`Dog`, `Whimper (dog)`, `Bark`, `Yip`) for testing with a dog wearing the breathing band.
-"""
+"""On-device YAMNet classification of infant cries and dog vocalizations."""
 
 from __future__ import annotations
 
-import csv
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+from zipfile import BadZipFile, ZipFile
 
 import numpy as np
 
-SubjectMode = Literal["BABY", "PET_TEST"]
-
-BABY_CRY_CLASSES = {
-    "Baby cry, infant cry",
-    "Crying, sobbing",
-    "Screaming",
-    "Whimper",
-    "Wail, moan",
-}
-
-PET_TEST_CLASSES = BABY_CRY_CLASSES | {
-    "Dog",
-    "Bark",
-    "Yip",
-    "Howl",
-    "Bow-wow",
-    "Growling",
-    "Whimper (dog)",
-    "Canidae, dogs, wolves",
-}
+AUDIO_MODEL_PATH = Path("/app/models/yamnet.tflite")
+BABY_CRY = "Baby cry, infant cry"
+DOG_SOUNDS = ("Bark", "Yip", "Howl", "Bow-wow", "Growling", "Whimper (dog)")
+BACKGROUND_NOISE = ("Wind", "Wind noise (microphone)", "Mechanical fan", "Air conditioning", "Noise", "White noise")
+DOG_SOUND_EVIDENCE = 0.25
+AudioKind = Literal["BABY_CRY", "DOG_VOCALIZATION"]
 
 
 @dataclass
@@ -45,126 +23,98 @@ class AudioDetectionResult:
     top_label: str
     rms_level: float
     cry_triggered: bool
+    audio_kind: AudioKind | None = None
+
+
+def vocalization_score(scores: dict[str, float]) -> tuple[float, str, AudioKind]:
+    baby_score = scores.get(BABY_CRY, 0.0)
+    dog_label = max(DOG_SOUNDS, key=lambda label: scores.get(label, 0.0))
+    dog_score = scores.get(dog_label, 0.0)
+
+    # The general Dog class can support a bark or whimper, but cannot alert by itself.
+    general_dog = scores.get("Dog", 0.0)
+    if dog_score >= DOG_SOUND_EVIDENCE and general_dog > dog_score:
+        dog_score, dog_label = general_dog, "Dog"
+    if dog_score > baby_score:
+        return dog_score, dog_label, "DOG_VOCALIZATION"
+    return baby_score, BABY_CRY, "BABY_CRY"
 
 
 class AudioCryDetector:
-    """Detects baby cries (and dog vocalizations when in PET_TEST mode) from 16kHz mono audio."""
+    """Classify 16 kHz mono PCM with the local model and alert on vocalizations only."""
 
-    def __init__(
-        self,
-        subject_mode: SubjectMode = "BABY",
-        cry_threshold: float = 0.55,
-        tflite_model_path: str | Path | None = None,
-        class_map_csv_path: str | Path | None = None,
-    ) -> None:
-        self.subject_mode: SubjectMode = subject_mode
+    def __init__(self, cry_threshold: float = 0.55, tflite_model_path: str | Path = AUDIO_MODEL_PATH) -> None:
         self.cry_threshold = cry_threshold
         self._interpreter = None
-        self._class_names: list[str] = []
-
-        if tflite_model_path and Path(tflite_model_path).exists():
-            self._load_tflite(Path(tflite_model_path), Path(class_map_csv_path) if class_map_csv_path else None)
-
-    def _load_tflite(self, model_path: Path, csv_path: Path | None) -> None:
+        model = Path(tflite_model_path)
         try:
-            try:
-                from ai_edge_litert.interpreter import Interpreter  # type: ignore[import-not-found]
-            except ImportError:
-                from tflite_runtime.interpreter import Interpreter  # type: ignore[import-not-found]
+            with ZipFile(model) as archive:
+                self._labels = archive.read("yamnet_label_list.txt").decode("utf-8").splitlines()
 
-            self._interpreter = Interpreter(model_path=str(model_path))
-            self._interpreter.allocate_tensors()
-            if csv_path and csv_path.exists():
-                with csv_path.open("r", encoding="utf-8") as f:
-                    reader = csv.DictReader(f)
-                    self._class_names = [row["display_name"] for row in reader]
-        except Exception as exc:
-            print(f"[AudioCryDetector] TFLite load skipped ({exc}); using spectral harmonic detector.")
-            self._interpreter = None
+            from ai_edge_litert.interpreter import Interpreter  # type: ignore[import-not-found]
 
-    def analyze_waveform(self, waveform_16k: np.ndarray, sample_rate: int = 16000) -> AudioDetectionResult:
-        """Analyzes a 1D float32 mono waveform in [-1.0, 1.0]."""
-        if waveform_16k.size == 0:
-            return AudioDetectionResult(0.0, "Silence", 0.0, False)
+            interpreter = Interpreter(model_path=str(model), num_threads=1)
+            interpreter.allocate_tensors()
+            input_info = interpreter.get_input_details()[0]
+            output_info = interpreter.get_output_details()[0]
+            self._input_shape = tuple(int(size) for size in input_info["shape"])
+            self._window_size = int(np.prod(self._input_shape))
+            if input_info["dtype"] != np.float32 or self._window_size != 15600 or output_info["shape"][-1] != len(self._labels):
+                raise ValueError("Unexpected YAMNet model input or output")
+            self._input_index = input_info["index"]
+            self._output_index = output_info["index"]
+            self._interpreter = interpreter
+            print("[AudioCryDetector] YAMNet vocalization classifier ready.")
+        except (BadZipFile, ImportError, KeyError, OSError, RuntimeError, ValueError) as exc:
+            print(f"[AudioCryDetector] Audio alerts unavailable ({type(exc).__name__}); check the Edge model installation.")
 
-        samples = waveform_16k.astype(np.float32).flatten()
-        rms = float(np.sqrt(np.mean(np.square(samples))))
+    @property
+    def ready(self) -> bool:
+        return self._interpreter is not None
 
-        if rms < 0.015:
-            return AudioDetectionResult(
-                cry_prob=round(rms * 2.0, 3),
-                top_label="Silence",
-                rms_level=round(rms, 4),
-                cry_triggered=False,
-            )
+    def analyze_waveform(self, waveform_16k: np.ndarray) -> AudioDetectionResult:
+        samples = np.asarray(waveform_16k, dtype=np.float32).reshape(-1)
+        rms = float(np.sqrt(np.mean(np.square(samples)))) if samples.size else 0.0
+        if rms < 0.001:
+            return AudioDetectionResult(0.0, "Silence", round(rms, 4), False)
+        if not self.ready:
+            return AudioDetectionResult(0.0, "Audio classifier unavailable", round(rms, 4), False)
 
-        if self._interpreter is not None and self._class_names:
+        try:
             return self._analyze_with_yamnet(samples, rms)
-
-        return self._analyze_with_spectral_harmonics(samples, sample_rate, rms)
+        except (RuntimeError, ValueError) as exc:
+            self._interpreter = None
+            print(f"[AudioCryDetector] Audio alerts unavailable after inference error ({type(exc).__name__}).")
+            return AudioDetectionResult(0.0, "Audio classifier unavailable", round(rms, 4), False)
 
     def _analyze_with_yamnet(self, samples: np.ndarray, rms: float) -> AudioDetectionResult:
-        assert self._interpreter is not None
-        input_details = self._interpreter.get_input_details()
-        output_details = self._interpreter.get_output_details()
+        interpreter = self._interpreter
+        assert interpreter is not None
+        if samples.size < self._window_size:
+            samples = np.pad(samples, (0, self._window_size - samples.size))
+        last_offset = samples.size - self._window_size
+        offsets = [*range(0, last_offset, self._window_size // 2), last_offset]
+        highest_target = 0.0
+        top_score, top_label = -1.0, "Unknown"
+        alert_score = 0.0
+        alert_kind: AudioKind | None = None
+        alert_label = ""
 
-        self._interpreter.resize_tensor_input(input_details[0]["index"], [len(samples)])
-        self._interpreter.allocate_tensors()
-        self._interpreter.set_tensor(input_details[0]["index"], samples)
-        self._interpreter.invoke()
+        for offset in offsets:
+            window = samples[offset:offset + self._window_size]
+            interpreter.set_tensor(self._input_index, window.reshape(self._input_shape))
+            interpreter.invoke()
+            output = interpreter.get_tensor(self._output_index).reshape(-1)
+            scores = dict(zip(self._labels, output))
+            top_index = int(np.argmax(output))
+            if output[top_index] > top_score:
+                top_score, top_label = float(output[top_index]), self._labels[top_index]
+            score, label, kind = vocalization_score(scores)
+            highest_target = max(highest_target, score)
+            noise_score = max(scores.get(noise, 0.0) for noise in BACKGROUND_NOISE)
+            if score >= self.cry_threshold and score > max(noise_score, alert_score):
+                alert_score, alert_label, alert_kind = score, label, kind
 
-        scores = self._interpreter.get_tensor(output_details[0]["index"])
-        mean_scores = np.mean(scores, axis=0)
-        top_idx = int(np.argmax(mean_scores))
-        top_label = self._class_names[top_idx] if top_idx < len(self._class_names) else f"class_{top_idx}"
-
-        target_set = PET_TEST_CLASSES if self.subject_mode == "PET_TEST" else BABY_CRY_CLASSES
-        target_indices = [i for i, name in enumerate(self._class_names) if name in target_set]
-        cry_prob = float(np.max(mean_scores[target_indices])) if target_indices else float(mean_scores[top_idx])
-
-        return AudioDetectionResult(
-            cry_prob=round(cry_prob, 3),
-            top_label=top_label,
-            rms_level=round(rms, 4),
-            cry_triggered=cry_prob >= self.cry_threshold,
-        )
-
-    def _analyze_with_spectral_harmonics(
-        self, samples: np.ndarray, sample_rate: int, rms: float
-    ) -> AudioDetectionResult:
-        """Spectral harmonic detector tuned for infant cries (350-2200 Hz) & dog whimpers/barks."""
-        windowed = samples * np.hanning(len(samples))
-        spectrum = np.abs(np.fft.rfft(windowed))
-        freqs = np.fft.rfftfreq(len(samples), d=1.0 / sample_rate)
-
-        total_energy = float(np.sum(spectrum**2)) + 1e-9
-
-        # Fundamental + primary harmonics band for infant cry / canine vocalization (300 Hz - 2400 Hz)
-        cry_band_mask = (freqs >= 300.0) & (freqs <= 2400.0)
-        cry_band_energy = float(np.sum(spectrum[cry_band_mask] ** 2))
-        band_ratio = cry_band_energy / total_energy
-
-        # Spectral crest factor (tonal harmonic peaks vs flat white/pink fan noise)
-        cry_band_spec = spectrum[cry_band_mask]
-        mean_spec = float(np.mean(cry_band_spec)) + 1e-9
-        max_spec = float(np.max(cry_band_spec)) if cry_band_spec.size > 0 else 0.0
-        tonality = min(1.0, (max_spec / mean_spec) / 14.0)
-
-        # Combine RMS loudness, harmonic band concentration, and tonality
-        loudness_factor = min(1.0, rms / 0.18)
-        cry_prob = float(np.clip(band_ratio * 0.45 + tonality * 0.35 + loudness_factor * 0.25, 0.0, 0.99))
-
-        if cry_prob >= self.cry_threshold:
-            label = "Baby cry, infant cry" if self.subject_mode == "BABY" else "Whimper (dog) / Baby cry"
-        elif rms > 0.05:
-            label = "Inside, small room"
-        else:
-            label = "Silence"
-
-        return AudioDetectionResult(
-            cry_prob=round(cry_prob, 3),
-            top_label=label,
-            rms_level=round(rms, 4),
-            cry_triggered=cry_prob >= self.cry_threshold,
-        )
-
+        if alert_kind is not None:
+            return AudioDetectionResult(round(float(alert_score), 3), alert_label, round(rms, 4), True, alert_kind)
+        return AudioDetectionResult(round(float(highest_target), 3), top_label, round(rms, 4), False)

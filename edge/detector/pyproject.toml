@@ -7,9 +7,15 @@ dependencies = [
     "numpy>=1.26.0",
     "opencv-python-headless>=4.9.0",
     "PyYAML>=6.0.1",
+    "ai-edge-litert==2.4.0; sys_platform == 'linux'",
+    "pywebpush>=2.0,<3",
 ]
 
 [project.optional-dependencies]
+gcp = [
+    "google-cloud-firestore>=2.16,<3",
+    "google-cloud-storage>=2.18,<4",
+]
 dev = [
     "pytest>=8.0.0",
 ]

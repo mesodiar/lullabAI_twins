@@ -20,6 +20,8 @@ lib/
 !/web/src/lib/types.ts
 !/web/src/lib/webrtc.ts
 /edge/local_events/
+/edge/push-secrets/
+/edge/cloud-secrets/
 lib64/
 parts/
 sdist/

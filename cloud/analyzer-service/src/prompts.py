@@ -87,6 +87,7 @@ def build_event_prompt(metadata: dict[str, Any]) -> str:
     band_detected = metadata.get("band_detected", "True")
     breathing_rpm = metadata.get("breathing_rpm", "N/A")
     cry_prob = metadata.get("yamnet_cry_prob", "0.0")
+    audio_kind = metadata.get("audio_kind") or "UNKNOWN"
     motion_score = metadata.get("motion_score", "0.0")
     cover_hint = ""
     if str(metadata.get("face_cover_suspected", False)).lower() == "true":
@@ -101,8 +102,11 @@ def build_event_prompt(metadata: dict[str, Any]) -> str:
         f"- ประเภททริกเกอร์: {trigger}\n"
         f"- ตรวจพบเด็กในเตียง (Baby/Subject Detected): {band_detected}\n"
         f"- อัตราการหายใจจาก Chest Optical Flow: {breathing_rpm} ครั้ง/นาที (RPM)\n"
-        f"- ความน่าจะเป็นเสียงร้อง (YAMNet/Harmonic): {cry_prob}\n"
+        f"- ประเภทเสียงจาก YAMNet: {audio_kind} (คะแนน {cry_prob})\n"
         f"- คะแนนการเคลื่อนไหว (Motion Score): {motion_score}\n\n"
         f"{cover_hint}"
+        "แยกเสียงเด็กกับเสียงสุนัขและระบุถ้าคลิปไม่มีเสียงหรือระบุแหล่งเสียงไม่ได้ "
+        "รายงานเฉพาะสิ่งที่เห็นหรือได้ยินในคลิป หากหลักฐานไม่พอให้ระบุว่าไม่ชัดเจน "
+        "ห้ามยืนยันว่าหายใจปกติหรือสรุปว่าปลอดภัยจากคลิปสั้น ๆ\n"
         "กรุณาวิเคราะห์ภาพ/วิดีโอที่แนบมานี้โดยไม่จำเป็นต้องมีแผ่นพันตัว และส่งคืนผลลัพธ์ตามโครงสร้าง SafetyAndSleepAnalysis"
     )

@@ -18,23 +18,21 @@ class GeminiSleepAnalyzer:
         location: str | None = None,
         model_id: str | None = None,
     ) -> None:
-        self.project_id = project_id or os.environ.get("GCP_PROJECT_ID", "")
-        self.location = location or os.environ.get("GCP_LOCATION", "asia-southeast1")
-        self.model_id = model_id or os.environ.get("VERTEX_MODEL_ID", "gemini-2.5-flash")
+        self.project_id = project_id if project_id is not None else os.environ.get("GCP_PROJECT_ID", "")
+        self.location = location or os.environ.get("VERTEX_LOCATION", "global")
+        self.model_id = model_id or os.environ.get("VERTEX_MODEL_ID", "gemini-3.1-flash-lite")
         self._client = None
 
-        if self.project_id and os.environ.get("DRY_RUN", "false").lower() != "true":
-            try:
-                from google import genai  # type: ignore[import-not-found]
+        if self.project_id:
+            from google import genai
+            from google.genai import types
 
-                self._client = genai.Client(
-                    vertexai=True,
-                    project=self.project_id,
-                    location=self.location,
-                )
-            except Exception as exc:
-                print(f"[GeminiSleepAnalyzer] Vertex AI client init skipped ({exc}); using heuristic fallback.")
-                self._client = None
+            self._client = genai.Client(
+                vertexai=True,
+                project=self.project_id,
+                location=self.location,
+                http_options=types.HttpOptions(api_version="v1", timeout=60000),
+            )
 
     def analyze_event(
         self,
@@ -44,43 +42,38 @@ class GeminiSleepAnalyzer:
         local_media_path: str | Path | None = None,
     ) -> SafetyAndSleepAnalysis:
         """Runs multimodal analysis via Vertex AI Gemini, falling back to deterministic rules in local dev."""
-        if self._client is not None and (gcs_uri or local_media_path):
-            try:
-                from google.genai import types  # type: ignore[import-not-found]
+        if self._client is None:
+            return self._heuristic_fallback(metadata)
 
-                subject_mode = str(metadata.get("subject_mode", "BABY"))
-                face_cover_suspected = str(metadata.get("face_cover_suspected", False)).lower() == "true"
-                if metadata.get("subject_type") == "PET" or face_cover_suspected:
-                    subject_mode = "PET_TEST"
-                sys_instruction = build_system_instruction(subject_mode)
-                prompt_text = build_event_prompt(metadata)
+        from google.genai import types
 
-                contents: list[Any] = []
-                if gcs_uri:
-                    contents.append(types.Part.from_uri(file_uri=gcs_uri, mime_type=mime_type))
-                elif local_media_path and Path(local_media_path).exists():
-                    raw_bytes = Path(local_media_path).read_bytes()
-                    contents.append(types.Part.from_bytes(data=raw_bytes, mime_type=mime_type))
-                contents.append(prompt_text)
+        subject_mode = str(metadata.get("subject_mode", "BABY"))
+        face_cover_suspected = str(metadata.get("face_cover_suspected", False)).lower() == "true"
+        if (metadata.get("subject_type") == "PET" or
+                metadata.get("audio_kind") == "DOG_VOCALIZATION" or face_cover_suspected):
+            subject_mode = "PET_TEST"
+        if gcs_uri:
+            media = types.Part.from_uri(file_uri=gcs_uri, mime_type=mime_type)
+        elif local_media_path:
+            media = types.Part.from_bytes(data=Path(local_media_path).read_bytes(), mime_type=mime_type)
+        else:
+            raise ValueError("Vertex AI review requires recorded media")
 
-                response = self._client.models.generate_content(
-                    model=self.model_id,
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        system_instruction=sys_instruction,
-                        temperature=0.1,
-                        response_mime_type="application/json",
-                        response_schema=SafetyAndSleepAnalysis,
-                    ),
-                )
-                if response.parsed is not None:
-                    return response.parsed  # type: ignore[return-value]
-                if response.text:
-                    return SafetyAndSleepAnalysis.model_validate_json(response.text)
-            except Exception as exc:
-                print(f"[GeminiSleepAnalyzer] Vertex AI call failed ({exc}); using fallback analyzer.")
-
-        return self._heuristic_fallback(metadata)
+        response = self._client.models.generate_content(
+            model=self.model_id,
+            contents=[media, build_event_prompt({**metadata, "subject_mode": subject_mode})],
+            config=types.GenerateContentConfig(
+                system_instruction=build_system_instruction(subject_mode),
+                temperature=0.1,
+                response_mime_type="application/json",
+                response_schema=SafetyAndSleepAnalysis,
+            ),
+        )
+        if response.parsed is not None:
+            return SafetyAndSleepAnalysis.model_validate(response.parsed)
+        if response.text:
+            return SafetyAndSleepAnalysis.model_validate_json(response.text)
+        raise ValueError("Vertex AI returned no review")
 
     @staticmethod
     def _heuristic_fallback(metadata: dict[str, Any]) -> SafetyAndSleepAnalysis:

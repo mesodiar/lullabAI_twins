@@ -10,6 +10,7 @@ import tempfile
 from typing import Any
 
 RECENT_EVENT_LIMIT = 15
+EVENT_ID = re.compile(r"evt_[0-9]+_[0-9a-f]{6}")
 MEDIA_NAME = re.compile(r"evt_[0-9]+_[0-9a-f]{6}(?:\.mp4|_thumb\.jpg)")
 
 
@@ -25,6 +26,15 @@ class LocalEventStore:
             staged = Path(directory) / target.name
             staged.write_text(json.dumps(event, ensure_ascii=False, indent=2), encoding="utf-8")
             staged.replace(target)
+
+    def load(self, event_id: str) -> dict[str, Any] | None:
+        if not EVENT_ID.fullmatch(event_id):
+            return None
+        try:
+            event = json.loads((self.directory / f"{event_id}.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return event if isinstance(event, dict) and event.get("event_id") == event_id else None
 
     def recent(self, baby_id: str) -> list[dict[str, Any]]:
         events = []
@@ -45,9 +55,9 @@ class LocalEventStore:
                 break
         return events
 
-    def save_media(self, clip: Path, snapshot: Path) -> dict[str, str]:
+    def save_media(self, clip: Path, snapshot: Path, audio: Path | None = None) -> dict[str, str | bool]:
         self.media_dir.mkdir(parents=True, exist_ok=True)
-        media: dict[str, str] = {}
+        media: dict[str, str | bool] = {}
 
         if snapshot.is_file() and snapshot.stat().st_size:
             snapshot.replace(self.media_dir / snapshot.name)
@@ -55,18 +65,23 @@ class LocalEventStore:
 
         if clip.is_file() and clip.stat().st_size:
             playable = clip.with_name("playable.mp4")
-            try:
-                subprocess.run(
-                    ["ffmpeg", "-loglevel", "error", "-y", "-i", str(clip), "-an",
-                     "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", "-c:v", "libx264",
-                     "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(playable)],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=30,
-                )
-            except (OSError, subprocess.SubprocessError) as exc:
-                print(f"[Edge] Clip encoding unavailable for {clip.name}: {type(exc).__name__}")
-            else:
-                playable.replace(self.media_dir / clip.name)
-                media["local_video_path"] = f"/media/{clip.name}"
+            for audio_source in (audio, None) if audio is not None else (None,):
+                audio_input = ["-i", str(audio_source)] if audio_source is not None else []
+                audio_mapping = ["-map", "1:a:0", "-c:a", "aac", "-shortest"] if audio_source is not None else ["-an"]
+                try:
+                    subprocess.run(
+                        ["ffmpeg", "-loglevel", "error", "-y", "-i", str(clip), *audio_input, "-map", "0:v:0",
+                         "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                         *audio_mapping, "-movflags", "+faststart", str(playable)],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=30,
+                    )
+                except (OSError, subprocess.SubprocessError) as exc:
+                    print(f"[Edge] Clip encoding failed for {clip.name}: {type(exc).__name__}")
+                else:
+                    playable.replace(self.media_dir / clip.name)
+                    media["local_video_path"] = f"/media/{clip.name}"
+                    media["local_video_has_audio"] = audio_source is not None
+                    break
         return media
 
     def media_path(self, name: str) -> Path | None:

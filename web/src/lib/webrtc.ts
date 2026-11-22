@@ -22,13 +22,12 @@ export function connectGo2RTCStream(
   let closed = false;
   let fallbackTimer: number | null = null;
 
-  const wsProtocol = go2rtcBaseUrl.startsWith("https") ? "wss" : "ws";
-  const hostPart = go2rtcBaseUrl.replace(/^https?:\/\//, "").replace(/\/$/, "");
-  const wsUrl = `${wsProtocol}://${hostPart}/api/ws?src=${encodeURIComponent(streamName)}`;
-
   onProtocolChange("CONNECTING");
 
   try {
+    const wsUrl = new URL(`${go2rtcBaseUrl.replace(/\/$/, "")}/api/ws`, window.location.href);
+    wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
+    wsUrl.searchParams.set("src", streamName);
     ws = new WebSocket(wsUrl);
   } catch {
     onFallbackToMock();

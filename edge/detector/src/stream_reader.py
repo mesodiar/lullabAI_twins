@@ -6,6 +6,7 @@ from collections import deque
 import io
 import os
 from pathlib import Path
+import select
 import subprocess
 import threading
 import time
@@ -15,6 +16,9 @@ import wave
 import numpy as np
 
 from cv_compat import cv2
+
+AUDIO_SAMPLE_RATE = 16_000
+TimedFrame = tuple[float, np.ndarray]
 
 
 class RingBufferStreamReader:
@@ -38,9 +42,12 @@ class RingBufferStreamReader:
         self.pre_roll_seconds = pre_roll_seconds
 
         max_frames = max(15, int(fps * (pre_roll_seconds + post_roll_seconds)) + 2)
-        self._frame_buffer: deque[tuple[float, np.ndarray]] = deque(maxlen=max_frames)
-        self._latest_capture: tuple[float, np.ndarray] | None = None
+        self._frame_buffer: deque[TimedFrame] = deque(maxlen=max_frames)
+        self._latest_capture: TimedFrame | None = None
         self._lock = threading.Lock()
+        self._audio_buffer: deque[tuple[float, np.ndarray]] = deque()
+        self._audio_lock = threading.Lock()
+        self._audio_buffer_seconds = max(1.5, pre_roll_seconds + post_roll_seconds) + 3
         self._cap: cv2.VideoCapture | None = None
 
     def _read_frame(self) -> np.ndarray | None:
@@ -100,62 +107,114 @@ class RingBufferStreamReader:
             self._frame_buffer.append(capture)
             return capture[1]
 
-    def fetch_audio_waveform(self, duration_sec: float = 1.5) -> np.ndarray:
-        """Fetches 16kHz mono float32 audio from RTSP (via ffmpeg) or HTTP WAV endpoint."""
-        # 1. If a real RTSP audio stream URL is configured, sample 1.5s of 16kHz mono PCM via ffmpeg
-        if self.rtsp_audio_url and self.rtsp_audio_url.startswith("rtsp://"):
-            try:
-                cmd = [
-                    "ffmpeg",
-                    "-rtsp_transport",
-                    "tcp",
-                    "-i",
-                    self.rtsp_audio_url,
-                    "-t",
-                    f"{duration_sec:.1f}",
-                    "-vn",
-                    "-ac",
-                    "1",
-                    "-ar",
-                    "16000",
-                    "-f",
-                    "s16le",
-                    "-loglevel",
-                    "quiet",
-                    "pipe:1",
-                ]
-                proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=4.0, check=False)
-                if proc.stdout:
-                    pcm16 = np.frombuffer(proc.stdout, dtype=np.int16)
-                    if pcm16.size > 0:
-                        return (pcm16.astype(np.float32) / 32768.0).clip(-1.0, 1.0)
-            except Exception:
-                pass
+    def _buffer_audio(self, started_at: float, samples: np.ndarray) -> None:
+        with self._audio_lock:
+            self._audio_buffer.append((started_at, samples))
+            cutoff = started_at - self._audio_buffer_seconds
+            while self._audio_buffer:
+                first_at, first_samples = self._audio_buffer[0]
+                if first_at + len(first_samples) / AUDIO_SAMPLE_RATE >= cutoff:
+                    break
+                self._audio_buffer.popleft()
 
-        # 2. Fallback to HTTP WAV endpoint (go2rtc or mock-camera)
-        if self.audio_wav_url:
-            sep = "&" if "?" in self.audio_wav_url else "?"
-            url = f"{self.audio_wav_url}{sep}duration={duration_sec:.1f}"
+    def _capture_rtsp_audio(self) -> None:
+        command = [
+            "ffmpeg", "-nostdin", "-loglevel", "error",
+            "-rtsp_transport", "tcp", "-analyzeduration", "100000", "-probesize", "32768",
+            "-i", self.rtsp_audio_url, "-map", "0:a:0",
+            "-ac", "1", "-ar", str(AUDIO_SAMPLE_RATE), "-f", "s16le", "-flush_packets", "1", "pipe:1",
+        ]
+        with subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0
+        ) as process:
+            assert process.stdout is not None
+            next_sample_at: float | None = None
+            remainder = b""
             try:
-                with urllib.request.urlopen(url, timeout=3.0) as resp:
-                    wav_bytes = resp.read()
-                with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
-                    raw_pcm = wf.readframes(wf.getnframes())
-                    pcm16 = np.frombuffer(raw_pcm, dtype=np.int16)
-                    return (pcm16.astype(np.float32) / 32768.0).clip(-1.0, 1.0)
-            except Exception:
-                pass
+                # Stop and reconnect if the camera stops producing audio.
+                while select.select([process.stdout], [], [], 5)[0]:
+                    data = process.stdout.read(4096)
+                    if not data:
+                        break
+                    data = remainder + data
+                    complete_bytes = len(data) - len(data) % 2
+                    remainder = data[complete_bytes:]
+                    if not complete_bytes:
+                        continue
+                    samples = np.frombuffer(data[:complete_bytes], dtype="<i2")
+                    duration = len(samples) / AUDIO_SAMPLE_RATE
+                    started_at = time.monotonic() - duration
+                    if next_sample_at is not None and abs(started_at - next_sample_at) < 0.4:
+                        started_at = next_sample_at
+                    self._buffer_audio(started_at, samples)
+                    next_sample_at = started_at + duration
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
 
-        return np.zeros(int(16000 * duration_sec), dtype=np.float32)
+    def _capture_wav_audio(self, duration: float) -> None:
+        url = self.audio_wav_url
+        if url is None:
+            return
+        separator = "&" if "?" in url else "?"
+        with urllib.request.urlopen(f"{url}{separator}duration={duration:.1f}", timeout=3) as response:
+            content = response.read()
+        with wave.open(io.BytesIO(content), "rb") as source:
+            if (source.getframerate(), source.getnchannels(), source.getsampwidth()) != (AUDIO_SAMPLE_RATE, 1, 2):
+                return
+            samples = np.frombuffer(source.readframes(source.getnframes()), dtype="<i2")
+        if samples.size:
+            self._buffer_audio(time.monotonic() - len(samples) / AUDIO_SAMPLE_RATE, samples)
+
+    def capture_audio_forever(self) -> None:
+        """Drain the microphone once for both the detector and event clips."""
+        if not self.rtsp_audio_url and not self.audio_wav_url:
+            return
+        while True:
+            if self.rtsp_audio_url and self.rtsp_audio_url.startswith("rtsp://"):
+                try:
+                    self._capture_rtsp_audio()
+                except OSError:
+                    # The camera or FFmpeg may be temporarily unavailable.
+                    pass
+            if not self.audio_wav_url:
+                time.sleep(1)
+                continue
+            started_at = time.monotonic()
+            try:
+                self._capture_wav_audio(1.5)
+            except (OSError, EOFError, ValueError, wave.Error):
+                pass
+            time.sleep(max(0.0, 1.5 - (time.monotonic() - started_at)))
+
+    def get_buffered_audio(self, start: float, end: float) -> np.ndarray | None:
+        count = max(0, round((end - start) * AUDIO_SAMPLE_RATE))
+        with self._audio_lock:
+            blocks = list(self._audio_buffer)
+        audio: np.ndarray | None = None
+        for captured_at, samples in blocks:
+            offset = round((captured_at - start) * AUDIO_SAMPLE_RATE)
+            left = max(0, offset)
+            right = min(count, offset + len(samples))
+            if right <= left:
+                continue
+            if audio is None:
+                audio = np.zeros(count, dtype="<i2")
+            audio[left:right] = samples[left - offset:right - offset]
+        return audio
 
     def get_buffered_frames(
         self, *, after: float | None = None, through: float | None = None
-    ) -> list[np.ndarray]:
+    ) -> list[TimedFrame]:
         end = time.monotonic() if through is None else through
         start = end - self.pre_roll_seconds if after is None else after
         with self._lock:
-            frames = [frame for captured_at, frame in self._frame_buffer if start < captured_at <= end]
-        return [frame.copy() for frame in frames]
+            frames = [(captured_at, frame) for captured_at, frame in self._frame_buffer if start < captured_at <= end]
+        return [(captured_at, frame.copy()) for captured_at, frame in frames]
 
     def get_latest_frame(self) -> np.ndarray | None:
         with self._lock:
@@ -167,9 +226,11 @@ class RingBufferStreamReader:
         self,
         output_dir: Path,
         event_id: str,
-        frames: list[np.ndarray] | None = None,
-    ) -> tuple[Path, Path]:
-        """Writes an MP4 video clip (pre-roll + post-roll) and a high-res JPEG thumbnail."""
+        frames: list[TimedFrame] | None = None,
+        *,
+        include_audio: bool = False,
+    ) -> tuple[Path, Path, Path | None]:
+        """Stages time-aligned video and audio plus a thumbnail for one event."""
         output_dir.mkdir(parents=True, exist_ok=True)
         if frames is None:
             frames = self.get_buffered_frames()
@@ -180,23 +241,41 @@ class RingBufferStreamReader:
         snapshot_path = output_dir / f"{event_id}_thumb.jpg"
         clip_path = output_dir / f"{event_id}.mp4"
 
-        latest_frame = frames[-1]
+        started_at = frames[0][0]
+        frame_count = max(1, round((frames[-1][0] - started_at) * self.fps) + 1)
+        audio = self.get_buffered_audio(started_at, started_at + frame_count / self.fps) if include_audio else None
+
+        latest_frame = frames[-1][1]
         cv2.imwrite(str(snapshot_path), latest_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
 
         h, w = latest_frame.shape[:2]
         if hasattr(cv2, "VideoWriter_fourcc"):
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
             writer = cv2.VideoWriter(str(clip_path), fourcc, float(self.fps), (w, h))
-            for frm in frames:
-                if frm.shape[:2] != (h, w):
-                    frm = cv2.resize(frm, (w, h))
-                writer.write(frm)
-            writer.release()
+            try:
+                frame_index = 0
+                for index in range(frame_count):
+                    at = started_at + index / self.fps
+                    # Keep the video timeline at the capture rate even if some frames arrived late.
+                    while frame_index + 1 < len(frames) and frames[frame_index + 1][0] <= at + 0.5 / self.fps:
+                        frame_index += 1
+                    frame = frames[frame_index][1]
+                    if frame.shape[:2] != (h, w):
+                        frame = cv2.resize(frame, (w, h))
+                    writer.write(frame)
+            finally:
+                writer.release()
         else:
             # In pure-NumPy fallback mode without OpenCV VideoWriter, copy snapshot as placeholder
             clip_path.write_bytes(snapshot_path.read_bytes())
 
-        return clip_path, snapshot_path
+        audio_path = None
+        if audio is not None:
+            audio_path = output_dir / "microphone.wav"
+            with wave.open(str(audio_path), "wb") as destination:
+                destination.setparams((1, 2, AUDIO_SAMPLE_RATE, 0, "NONE", "not compressed"))
+                destination.writeframes(audio.tobytes())
+        return clip_path, snapshot_path, audio_path
 
     def close(self) -> None:
         if self._cap is not None:

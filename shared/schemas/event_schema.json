@@ -45,6 +45,9 @@
       "type": "string",
       "enum": ["EDGE_DETECTED", "PENDING_AI", "ANALYZED", "FALSE_ALARM_SUPPRESSED"]
     },
+    "cloud_review": {
+      "enum": ["PENDING", "REVIEWED", "UNAVAILABLE"]
+    },
     "created_at": {
       "type": "string",
       "format": "date-time"
@@ -69,6 +72,12 @@
         },
         "yamnet_top_label": {
           "type": "string"
+        },
+        "audio_kind": {
+          "enum": [null, "BABY_CRY", "DOG_VOCALIZATION"]
+        },
+        "audio_classifier_ready": {
+          "type": "boolean"
         },
         "motion_score": {
           "type": "number",
@@ -108,7 +117,8 @@
         "signed_video_url": { "type": ["string", "null"] },
         "signed_snapshot_url": { "type": ["string", "null"] },
         "local_video_path": { "type": "string" },
-        "local_snapshot_path": { "type": "string" }
+        "local_snapshot_path": { "type": "string" },
+        "local_video_has_audio": { "type": "boolean" }
       }
     },
     "ai_analysis": {
@@ -145,4 +155,3 @@
     }
   }
 }
-

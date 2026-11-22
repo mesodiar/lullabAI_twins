@@ -118,6 +118,37 @@ def test_legacy_periodic_events_skip_analysis_and_notifications() -> None:
     notifier.finalize_event.assert_not_called()
 
 
+def test_cloud_review_matches_registered_event_and_ignores_redelivery(monkeypatch) -> None:
+    monkeypatch.setenv("GCS_EVENTS_BUCKET", "private-qa")
+    analyzer = Mock(spec=GeminiSleepAnalyzer)
+    notifier = Mock(spec=CloudNotifier)
+    svc = System2AnalyzerService(analyzer=analyzer, notifier=notifier)
+    event_id = "evt_123_abcdef"
+    path = f"events/baby_1/{event_id}.mp4"
+    notifier.load_event.return_value = {
+        "baby_id": "baby_1",
+        "status": "PENDING_AI",
+        "trigger_type": "CRY",
+        "edge_metrics": {"audio_kind": "DOG_VOCALIZATION"},
+        "media": {"gcs_uri": f"gs://private-qa/{path}"},
+    }
+    object_data = {"name": path, "metadata": {"event_id": event_id}}
+    assert svc.handle_gcs_cloudevent({**object_data, "bucket": "other"})["status"] == "skipped_unrecognized_object"
+    notifier.load_event.assert_not_called()
+
+    event = {**object_data, "bucket": "private-qa"}
+    svc.handle_gcs_cloudevent(event)
+    args = analyzer.analyze_event.call_args.kwargs
+    assert args["metadata"]["audio_kind"] == "DOG_VOCALIZATION"
+    assert args["mime_type"] == "video/mp4"
+    assert args["gcs_uri"] == f"gs://private-qa/{path}"
+    notifier.finalize_event.assert_called_once()
+
+    notifier.load_event.return_value["status"] = "ANALYZED"
+    assert svc.handle_gcs_cloudevent(event)["status"] == "already_reviewed"
+    analyzer.analyze_event.assert_called_once()
+
+
 def test_pet_cover_warning_remains_unconfirmed_without_video_analysis(tmp_path: Path) -> None:
     svc = System2AnalyzerService(
         analyzer=GeminiSleepAnalyzer(project_id=""),

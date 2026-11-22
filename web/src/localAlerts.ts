@@ -13,12 +13,16 @@ export function isPetCoverAlert(event: LullabAIEvent) {
 }
 
 export function alertTitle(event: LullabAIEvent) {
+  if (event.trigger_type === "CRY" && event.edge_metrics.audio_kind === "DOG_VOCALIZATION") {
+    return "Possible dog vocalization";
+  }
   return isPetCoverAlert(event) ? "Possible blanket over dog's face" : TITLES[event.trigger_type];
 }
 
 export function isImportantAlert(event: LullabAIEvent) {
   return event.trigger_type !== "PERIODIC_CHECK" &&
-    event.status !== "FALSE_ALARM_SUPPRESSED" && !event.ai_analysis?.is_false_alarm;
+    event.status !== "FALSE_ALARM_SUPPRESSED" &&
+    (event.cloud_review === "REVIEWED" || !event.ai_analysis?.is_false_alarm);
 }
 
 export async function requestLocalNotifications() {

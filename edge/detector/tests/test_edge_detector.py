@@ -14,13 +14,15 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "edge" / "detector" / "src"))
 sys.path.insert(0, str(ROOT / "edge" / "mock-camera"))
 
-from audio_cry import AudioCryDetector  # noqa: E402
+from audio_cry import AudioCryDetector, AudioDetectionResult, vocalization_score  # noqa: E402
 from breathing_band import BreathingBandTracker  # noqa: E402
 from cv_compat import cv2  # noqa: E402
 from local_events import LocalEventStore  # noqa: E402
+from main import BabyMonitorPipeline  # noqa: E402
 from mock_streamer import MockCameraState  # noqa: E402
 from motion import MotionDetector  # noqa: E402
 from pet_cover import PetCoverDetector  # noqa: E402
+from stream_reader import AUDIO_SAMPLE_RATE, RingBufferStreamReader  # noqa: E402
 
 
 SAMPLE_IMAGE = ROOT / "edge" / "assets" / "sample_baby_band.jpg"
@@ -151,12 +153,13 @@ def test_local_trigger_persists_history_and_snapshot_without_cloud(tmp_path, mon
         {"post_roll_seconds": 0},
         store,
     )
-    monkeypatch.setattr(pipeline.reader, "get_buffered_frames", lambda **kwargs: [np.zeros((32, 32, 3), dtype=np.uint8)])
+    monkeypatch.setattr(pipeline.reader, "get_buffered_frames", lambda **kwargs: [(0.0, np.zeros((32, 32, 3), dtype=np.uint8))])
 
-    def export_snapshot(directory, event_id, frames):
+    def export_snapshot(directory, event_id, frames, *, include_audio):
+        assert include_audio
         snapshot = directory / f"{event_id}_thumb.jpg"
         snapshot.write_bytes(b"test snapshot")
-        return directory / f"{event_id}.mp4", snapshot
+        return directory / f"{event_id}.mp4", snapshot, None
 
     monkeypatch.setattr(pipeline.reader, "export_clip_and_snapshot", export_snapshot)
     event = pipeline.handle_triggered_event("CRY", {"yamnet_cry_prob": 0.7})
@@ -177,6 +180,22 @@ def test_local_trigger_persists_history_and_snapshot_without_cloud(tmp_path, mon
     assert [item["event_id"] for item in reopened] == [legacy["event_id"], event["event_id"]]
     assert reopened[0]["status"] == "EDGE_DETECTED"
     assert json.loads((tmp_path / f"{legacy['event_id']}.json").read_text())["status"] == "PENDING_AI"
+
+
+def test_buffered_microphone_audio_keeps_gaps_and_clips_to_requested_window() -> None:
+    reader = RingBufferStreamReader("")
+    half_second = AUDIO_SAMPLE_RATE // 2
+    quarter_second = AUDIO_SAMPLE_RATE // 4
+    reader._buffer_audio(100.0, np.full(half_second, 1200, dtype="<i2"))
+    reader._buffer_audio(100.75, np.full(half_second, -800, dtype="<i2"))
+
+    audio = reader.get_buffered_audio(100.25, 101.0)
+    assert audio is not None
+    np.testing.assert_array_equal(audio[:quarter_second], 1200)
+    np.testing.assert_array_equal(audio[quarter_second:half_second], 0)
+    np.testing.assert_array_equal(audio[half_second:], -800)
+    assert audio.size == 3 * quarter_second
+    assert reader.get_buffered_audio(101.25, 102.0) is None
 
 
 def test_cover_alert_requires_a_tracked_pet_and_fires_once_per_episode(monkeypatch) -> None:
@@ -328,22 +347,41 @@ def test_empty_crib_and_furnished_room_are_classified_as_none() -> None:
     assert res_room.band_bbox is None
 
 
-def test_audio_cry_and_pet_mode_detector() -> None:
-    """Verifies that normal room noise is ignored and CRY mode audio triggers detection."""
+def test_audio_detector_does_not_use_a_tone_as_fallback(tmp_path: Path) -> None:
     cam = MockCameraState(SAMPLE_IMAGE)
-    detector = AudioCryDetector(subject_mode="PET_TEST", cry_threshold=0.55)
-
-    cam.set_mode("NORMAL")
-    quiet_samples = cam.generate_audio_samples(duration_sec=1.5)
-    quiet_res = detector.analyze_waveform(quiet_samples)
-    assert quiet_res.cry_triggered is False
-    assert quiet_res.cry_prob < 0.3
+    detector = AudioCryDetector(tflite_model_path=tmp_path / "missing.tflite")
 
     cam.set_mode("CRY")
-    cry_samples = cam.generate_audio_samples(duration_sec=1.5)
-    cry_res = detector.analyze_waveform(cry_samples)
-    assert cry_res.cry_triggered is True
-    assert cry_res.cry_prob >= 0.55
+    result = detector.analyze_waveform(cam.generate_audio_samples(duration_sec=1.5))
+    assert not detector.ready
+    assert not result.cry_triggered
+    assert result.audio_kind is None
+    assert result.top_label == "Audio classifier unavailable"
+
+
+def test_vocalization_score_requires_specific_baby_or_dog_labels() -> None:
+    assert vocalization_score({"Dog": 0.95, "Pant": 0.95, "Crying, sobbing": 0.95})[0] == 0.0
+    assert vocalization_score({"Bark": 0.50, "Dog": 0.80}) == (0.80, "Dog", "DOG_VOCALIZATION")
+    assert vocalization_score({"Baby cry, infant cry": 0.70, "Bark": 0.10}) == (
+        0.70, "Baby cry, infant cry", "BABY_CRY",
+    )
+
+
+def test_dog_vocalization_does_not_cool_down_baby_cry_alerts(tmp_path: Path) -> None:
+    pipeline = BabyMonitorPipeline(
+        {"baby_id": "test", "camera_id": "test", "video_source_url": ""},
+        {"cooldowns": {"CRY": 30.0}},
+        LocalEventStore(tmp_path),
+    )
+    subject = SimpleNamespace(subject_type="NONE", rollover_suspected=False)
+    motion = SimpleNamespace(motion_triggered=False)
+    dog = AudioDetectionResult(0.8, "Bark", 0.1, True, "DOG_VOCALIZATION")
+    baby = AudioDetectionResult(0.8, "Baby cry, infant cry", 0.1, True, "BABY_CRY")
+
+    assert pipeline.evaluate_triggers(subject, motion, dog, 100.0) == "CRY"
+    assert pipeline.evaluate_triggers(subject, motion, dog, 101.0) is None
+    assert pipeline.evaluate_triggers(subject, motion, baby, 102.0) == "CRY"
+    assert pipeline.evaluate_triggers(subject, motion, baby, 103.0) is None
 
 
 def test_motion_detector_roi() -> None:

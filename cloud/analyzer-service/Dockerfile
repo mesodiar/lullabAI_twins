@@ -8,8 +8,7 @@ RUN pip install --no-cache-dir \
     "uvicorn[standard]" \
     pydantic \
     google-genai \
-    google-cloud-firestore \
-    firebase-admin
+    google-cloud-firestore
 
 COPY src /app/src
 

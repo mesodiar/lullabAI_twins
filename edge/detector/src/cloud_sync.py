@@ -1,195 +1,120 @@
-"""Cloud Sync Client for Edge Node (Fast-Path Firestore + FCM + GCS Upload)."""
+"""Upload eligible event media and retrieve reviews without blocking the Edge monitor."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-import json
+from datetime import datetime, timedelta
 import os
 from pathlib import Path
+import threading
+import time
 from typing import Any
-import urllib.request
 
+from local_events import LocalEventStore
 
-FAST_PATH_TITLES_TH = {
-    "CRY": "🚨 ตรวจพบเสียงร้อง — กำลังให้ AI วิเคราะห์...",
-    "BAND_ROLLOVER": "⚠️ ตรวจพบความเสี่ยงพลิกคว่ำ/หน้าถูกปิดบัง — กำลังตรวจสอบด่วน!",
-    "BREATHING_ANOMALY": "⚠️ จังหวะการขยับหน้าอกหายใจผิดปกติ — กำลังตรวจสอบด่วน!",
-    "MOTION": "👀 น้องขยับตัวแรงในเตียง — กำลังวิเคราะห์ภาพ...",
-}
+SUPPORTED_TRIGGERS = frozenset({"CRY", "MOTION", "BAND_ROLLOVER", "BREATHING_ANOMALY"})
 
 
 class CloudSyncClient:
-    """Manages Stage-1 Fast-Path alerts (Firestore + FCM) and GCS media uploads."""
+    def __init__(self, store: LocalEventStore, firestore: Any, bucket: Any) -> None:
+        self.store = store
+        self.firestore = firestore
+        self.bucket = bucket
+        self.queue = store.directory / ".cloud_pending"
+        self.queue.mkdir(parents=True, exist_ok=True)
+        for pending in store.directory.glob("evt_*.json"):
+            event = store.load(pending.stem)
+            if event and event.get("cloud_review") == "PENDING":
+                (self.queue / pending.stem).touch()
 
-    def __init__(
-        self,
-        project_id: str | None = None,
-        gcs_bucket: str | None = None,
-        fcm_topic: str = "lullabai_parents",
-        local_events_dir: str | Path = "./local_events",
-        local_analyzer_url: str | None = None,
-    ) -> None:
-        self.project_id = project_id or os.environ.get("GCP_PROJECT_ID", "")
-        self.gcs_bucket = gcs_bucket or os.environ.get("GCS_EVENTS_BUCKET", "")
-        self.fcm_topic = fcm_topic
-        self.local_events_dir = Path(local_events_dir)
-        self.local_analyzer_url = local_analyzer_url or os.environ.get("LOCAL_ANALYZER_URL")
+    @classmethod
+    def from_env(cls, store: LocalEventStore) -> CloudSyncClient | None:
+        if os.environ.get("LULLABAI_GCP_ENABLED") != "1":
+            return None
 
-        self._firestore_client = None
-        self._storage_client = None
-        self._firebase_initialized = False
-
-        if self.project_id and os.environ.get("DRY_RUN", "false").lower() != "true":
-            self._init_gcp_clients()
-
-    def _init_gcp_clients(self) -> None:
         try:
-            from google.cloud import firestore, storage  # type: ignore[import-not-found]
-            import firebase_admin  # type: ignore[import-not-found]
+            from google.cloud import firestore, storage
 
-            self._firestore_client = firestore.Client(project=self.project_id)
-            self._storage_client = storage.Client(project=self.project_id)
-            if not firebase_admin._apps:
-                firebase_admin.initialize_app()
-            self._firebase_initialized = True
+            project = os.environ.get("GCP_PROJECT_ID", "lullabai-twins")
+            database = os.environ.get("GCP_FIRESTORE_DATABASE", "lullabai-events")
+            bucket = os.environ.get("GCS_EVENTS_BUCKET", f"{project}-lullabai-events")
+            client = cls(store, firestore.Client(project=project, database=database),
+                         storage.Client(project=project).bucket(bucket))
         except Exception as exc:
-            print(f"[CloudSyncClient] Running in Local/Dry-Run mode (GCP init skipped: {exc})")
-            self._firestore_client = None
-            self._storage_client = None
+            print(f"[CloudSync] Cloud review unavailable ({type(exc).__name__}).")
+            return None
+        threading.Thread(target=client._run, name="cloud-sync", daemon=True).start()
+        print("[CloudSync] GCP event reviews enabled.")
+        return client
 
-    def send_fast_path_alert(self, event_doc: dict[str, Any]) -> None:
-        """Stage 1 (T+0.5s): Writes PENDING_AI event to Firestore and fires immediate FCM push."""
-        event_id = event_doc["event_id"]
-        baby_id = event_doc["baby_id"]
-        trigger_type = event_doc["trigger_type"]
-        metrics = event_doc.get("edge_metrics", {})
+    def enqueue(self, event: dict[str, Any]) -> None:
+        if event.get("simulated") or event["trigger_type"] not in SUPPORTED_TRIGGERS or not event.get("media"):
+            return
+        # The clip and its metadata are already saved. Keep the queue on disk across restarts.
+        pending = {**event, "cloud_review": "PENDING"}
+        self.store.save(pending)
+        (self.queue / event["event_id"]).touch()
+        event.update(pending)
 
-        # 1. Persist locally for dev visibility / offline audit
-        self.local_events_dir.mkdir(parents=True, exist_ok=True)
-        local_json = self.local_events_dir / f"{event_id}.json"
-        local_json.write_text(json.dumps(event_doc, ensure_ascii=False, indent=2), encoding="utf-8")
+    def with_review(self, event: dict[str, Any]) -> dict[str, Any]:
+        if event.get("cloud_review") == "PENDING":
+            return self.store.load(event["event_id"]) or event
+        return event
 
-        # 2. Write to Cloud Firestore if configured
-        if self._firestore_client is not None:
-            self._firestore_client.collection("events").document(event_id).set(event_doc)
-            self._firestore_client.collection("babies").document(baby_id).set(
-                {
-                    "baby_id": baby_id,
-                    "camera_id": event_doc["camera_id"],
-                    "subject_mode": event_doc["subject_mode"],
-                    "latest_event_id": event_id,
-                    "latest_trigger_type": trigger_type,
-                    "breathing_rpm": metrics.get("breathing_rpm"),
-                    "band_detected": metrics.get("band_detected", False),
-                    "last_heartbeat_at": datetime.now(timezone.utc).isoformat(),
-                    "edge_online": True,
-                },
-                merge=True,
-            )
-
-        # 3. Fire Stage-1 Fast-Path FCM Web Push
-        if self._firebase_initialized:
+    def _run(self) -> None:
+        while True:
             try:
-                from firebase_admin import messaging  # type: ignore[import-not-found]
-
-                title = FAST_PATH_TITLES_TH.get(trigger_type, "🔔 แจ้งเตือนจาก LullabAI")
-                subj = metrics.get("subject_type", "BABY")
-                body = f"[{baby_id}] ตรวจพบเหตุการณ์ ({trigger_type}, {subj}) • รอผลตรวจละเอียดจาก Gemini AI สักครู่..."
-                if trigger_type == "BAND_ROLLOVER" and metrics.get("face_cover_suspected"):
-                    title = "⚠️ สงสัยว่าผ้าปิดหน้าน้องหมา"
-                    body = f"[{baby_id}] พบผ้าทับบริเวณที่ติดตามน้องหมา กรุณาเปิดดูกล้อง"
-
-                msg = messaging.Message(
-                    topic=self.fcm_topic,
-                    data={
-                        "event_id": event_id,
-                        "baby_id": baby_id,
-                        "stage": "FAST_PATH_EDGE",
-                        "trigger_type": trigger_type,
-                        "title": title,
-                        "body": body,
-                    },
-                    webpush=messaging.WebpushConfig(
-                        headers={"Urgency": "high"},
-                        notification=messaging.WebpushNotification(
-                            title=title,
-                            body=body,
-                            tag=event_id,  # Same tag allows Stage-2 AI result to replace this notification!
-                            renotify=True,
-                        ),
-                    ),
-                )
-                messaging.send(msg)
+                for marker in sorted(self.queue.glob("evt_*")):
+                    self._sync(marker)
             except Exception as exc:
-                print(f"[CloudSyncClient] Fast-path FCM send warning: {exc}")
+                # Let SDKs report failures on the next pass without logging media or credentials.
+                print(f"[CloudSync] Will retry cloud review ({type(exc).__name__}).")
+            time.sleep(15)
 
-    def upload_media_and_trigger_system2(
-        self,
-        event_doc: dict[str, Any],
-        clip_path: Path | None,
-        snapshot_path: Path,
-    ) -> dict[str, str | None]:
-        """Uploads snapshot & MP4 clip to GCS with custom metadata to trigger Eventarc -> Cloud Run."""
-        event_id = event_doc["event_id"]
-        baby_id = event_doc["baby_id"]
-        date_prefix = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        metrics = event_doc.get("edge_metrics", {})
+    def _sync(self, marker: Path) -> None:
+        from google.api_core.exceptions import AlreadyExists, PreconditionFailed
 
-        gcs_video_uri: str | None = None
-        gcs_snapshot_uri: str | None = None
+        event = self.store.load(marker.name)
+        if event is None or event.get("cloud_review") != "PENDING":
+            marker.unlink(missing_ok=True)
+            return
 
-        custom_metadata = {
-            "event_id": str(event_id),
-            "baby_id": str(baby_id),
-            "camera_id": str(event_doc["camera_id"]),
-            "subject_mode": str(event_doc["subject_mode"]),
-            "trigger_type": str(event_doc["trigger_type"]),
-            "band_detected": str(metrics.get("band_detected", False)),
-            "subject_type": str(metrics.get("subject_type", "")),
-            "face_cover_suspected": str(metrics.get("face_cover_suspected", False)),
-            "breathing_rpm": str(metrics.get("breathing_rpm") or ""),
-            "yamnet_cry_prob": str(metrics.get("yamnet_cry_prob", 0.0)),
-            "motion_score": str(metrics.get("motion_score", 0.0)),
-        }
+        created = datetime.fromisoformat(event["created_at"])
+        media = event["media"]
+        relative_url = media.get("local_video_path") or media.get("local_snapshot_path")
+        filename = relative_url.removeprefix("/media/") if relative_url else ""
+        clip = self.store.media_path(filename)
+        if clip is None or filename not in (f"{marker.name}.mp4", f"{marker.name}_thumb.jpg"):
+            self.store.save({**event, "cloud_review": "UNAVAILABLE"})
+            marker.unlink(missing_ok=True)
+            return
+        if datetime.now(created.tzinfo) - created >= timedelta(days=1):
+            self.store.save({**event, "cloud_review": "UNAVAILABLE"})
+            marker.unlink(missing_ok=True)
+            return
 
-        if self._storage_client is not None and self.gcs_bucket:
-            bucket = self._storage_client.bucket(self.gcs_bucket)
-
-            snap_blob_name = f"events/{baby_id}/{date_prefix}/{event_id}_thumb.jpg"
-            snap_blob = bucket.blob(snap_blob_name)
-            snap_blob.metadata = custom_metadata
-            snap_blob.upload_from_filename(str(snapshot_path), content_type="image/jpeg")
-            gcs_snapshot_uri = f"gs://{self.gcs_bucket}/{snap_blob_name}"
-
-            if clip_path and clip_path.exists():
-                clip_blob_name = f"events/{baby_id}/{date_prefix}/{event_id}.mp4"
-                clip_blob = bucket.blob(clip_blob_name)
-                clip_blob.metadata = custom_metadata
-                clip_blob.upload_from_filename(str(clip_path), content_type="video/mp4")
-                gcs_video_uri = f"gs://{self.gcs_bucket}/{clip_blob_name}"
-
-        # Optional: If running local analyzer service in dev/test mode, invoke it directly
-        if self.local_analyzer_url:
+        ref = self.firestore.collection("events").document(marker.name)
+        blob = self.bucket.blob(f"events/{event['baby_id']}/{filename}")
+        if marker.stat().st_size == 0:
+            document = {k: event[k] for k in ("event_id", "baby_id", "camera_id", "subject_mode",
+                                               "trigger_type", "created_at", "edge_metrics")}
+            document.update(status="PENDING_AI", expires_at=created + timedelta(days=7),
+                            media={"gcs_uri": f"gs://{self.bucket.name}/{blob.name}"})
             try:
-                payload = json.dumps(
-                    {
-                        "event_doc": event_doc,
-                        "local_snapshot_path": str(snapshot_path.resolve()),
-                        "local_clip_path": str(clip_path.resolve()) if clip_path else None,
-                    }
-                ).encode("utf-8")
-                req = urllib.request.Request(
-                    f"{self.local_analyzer_url.rstrip('/')}/analyze-local",
-                    data=payload,
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
-                )
-                urllib.request.urlopen(req, timeout=15.0)
-            except Exception as exc:
-                print(f"[CloudSyncClient] Local analyzer webhook skipped: {exc}")
+                ref.create(document, timeout=10)
+            except AlreadyExists:
+                pass
 
-        return {
-            "gcs_video_uri": gcs_video_uri,
-            "gcs_snapshot_uri": gcs_snapshot_uri,
-        }
+            mime_type = "video/mp4" if clip.suffix == ".mp4" else "image/jpeg"
+            blob.metadata = {"event_id": marker.name}
+            try:
+                blob.upload_from_filename(str(clip), content_type=mime_type, if_generation_match=0, timeout=15)
+            except PreconditionFailed:
+                # The previous attempt uploaded the same immutable object.
+                pass
+            marker.write_text("uploaded", encoding="utf-8")
 
+        review = ref.get(timeout=10).to_dict() or {}
+        if review.get("status") in ("ANALYZED", "FALSE_ALARM_SUPPRESSED") and review.get("ai_analysis"):
+            self.store.save({**event, "cloud_review": "REVIEWED", "status": "ANALYZED",
+                             "analyzed_at": review["analyzed_at"], "ai_analysis": review["ai_analysis"]})
+            marker.unlink(missing_ok=True)
