@@ -2,6 +2,7 @@ import { Bell, ChevronDown, MoonStar, Settings } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { disableBackgroundPush, enableBackgroundPush, prepareBackgroundPush, type BackgroundPushSetup } from "./backgroundPush";
 import "./dashboard.css";
+import { CloudReviewSettings, type CloudReviewStatus } from "./components/CloudReviewSettings";
 import { EventFeed } from "./components/EventFeed";
 import { LivePlayer } from "./components/LivePlayer";
 import { SafetyBanner } from "./components/SafetyBanner";
@@ -54,6 +55,9 @@ function initialProfile(bed: BedId, cameraId: string): DashboardProfile {
 }
 
 interface EdgeStatus {
+  cloud_reviews_available?: boolean;
+  cloud_reviews_enabled?: boolean;
+  cloud_review_setup_configured?: boolean;
   babies?: Partial<Record<BedId, {
     updated_at?: string;
     edge_metrics?: EdgeMetrics & { band_bbox_pct?: BabyProfile["band_bbox_pct"]; face_cover_suspected?: boolean };
@@ -79,6 +83,7 @@ export function App() {
   const [useMock, setUseMock] = useState(false);
   const [showDetection, setShowDetection] = useState(true);
   const [connection, setConnection] = useState("");
+  const [cloudReview, setCloudReview] = useState<CloudReviewStatus | null>(null);
   const [simulation, setSimulation] = useState<{ bed: BedId; trigger: SimulatedTrigger } | null>(null);
   const [simulationFeedback, setSimulationFeedback] = useState<{ bed: BedId; pending: boolean; message: string } | null>(null);
   const [mockFeedVersion, setMockFeedVersion] = useState(0);
@@ -172,6 +177,11 @@ export function App() {
         const data: EdgeStatus | undefined = response.ok ? await response.json() : undefined;
         if (controller.signal.aborted) return;
         updateBabies(data?.babies);
+        setCloudReview(data ? {
+          available: data.cloud_reviews_available === true,
+          enabled: data.cloud_reviews_enabled === true,
+          setupConfigured: data.cloud_review_setup_configured === true,
+        } : null);
         if (Array.isArray(data?.recent_events)) {
           const received = data.recent_events.filter((event) => event?.event_id && event.trigger_type !== "PERIODIC_CHECK");
           const nextEventIds = new Set(received.map((event) => event.event_id));
@@ -197,7 +207,10 @@ export function App() {
           });
         }
       } catch {
-        if (!controller.signal.aborted) updateBabies();
+        if (!controller.signal.aborted) {
+          updateBabies();
+          setCloudReview(null);
+        }
       } finally {
         polling = false;
       }
@@ -366,10 +379,13 @@ export function App() {
             </details>
             <details className="app-menu" name="dashboard-menu">
               <summary className="icon-button" aria-label="Settings"><Settings aria-hidden="true" /></summary>
-              <section className="menu-panel" aria-label="Camera settings">
-                <h2>Camera settings</h2>
+              <section className="menu-panel" aria-label="Settings">
+                <h2>Settings</h2>
                 <label><input type="checkbox" checked={useMock} onChange={(event) => setUseMock(event.target.checked)} /> Use mock camera</label>
                 <label><input type="checkbox" checked={showDetection} onChange={(event) => setShowDetection(event.target.checked)} /> Show detection boxes</label>
+                <CloudReviewSettings status={cloudReview} onChange={(enabled) => {
+                  setCloudReview((status) => status && { ...status, enabled });
+                }} />
                 <details className="menu-detail">
                   <summary>Connection details</summary>
                   <dl>

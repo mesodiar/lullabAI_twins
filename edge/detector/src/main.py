@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from datetime import datetime, timezone
+from hmac import compare_digest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -278,6 +279,7 @@ class EdgeStatusHandler(BaseHTTPRequestHandler):
     event_store: LocalEventStore
     web_push: WebPushService | None = None
     cloud_sync: CloudSyncClient | None = None
+    cloud_review_setup_code: str = ""
 
     def log_message(self, format: str, *args) -> None:
         pass
@@ -350,7 +352,7 @@ class EdgeStatusHandler(BaseHTTPRequestHandler):
         self._send_cors_headers()
         self.end_headers()
 
-    def _send_push_json(self, status: int, value: dict[str, Any]) -> None:
+    def _send_json(self, status: int, value: dict[str, Any]) -> None:
         body = json.dumps(value).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -362,13 +364,13 @@ class EdgeStatusHandler(BaseHTTPRequestHandler):
     def _push_subscription(self, action: str) -> None:
         service = self.web_push
         if service is None:
-            self._send_push_json(503, {"error": "Web Push is not configured"})
+            self._send_json(503, {"error": "Web Push is not configured"})
             return
         if action == "enroll" and not service.can_enroll(self.headers.get("X-Setup-Code", "")):
-            self._send_push_json(403, {"error": "Invalid setup code"})
+            self._send_json(403, {"error": "Invalid setup code"})
             return
         if self.headers.get_content_type() != "application/json":
-            self._send_push_json(415, {"error": "Expected a JSON subscription"})
+            self._send_json(415, {"error": "Expected a JSON subscription"})
             return
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -379,7 +381,7 @@ class EdgeStatusHandler(BaseHTTPRequestHandler):
                 raise ValueError("Invalid subscription")
             fields = subscription_fields(body)
         except (ValueError, OSError):
-            self._send_push_json(400, {"error": "Invalid push subscription"})
+            self._send_json(400, {"error": "Invalid push subscription"})
             return
         try:
             if action == "enroll":
@@ -387,12 +389,41 @@ class EdgeStatusHandler(BaseHTTPRequestHandler):
             elif action == "remove":
                 service.remove(fields)
             else:
-                self._send_push_json(200, {"registered": service.contains(fields)})
+                self._send_json(200, {"registered": service.contains(fields)})
                 return
         except sqlite3.Error:
-            self._send_push_json(503, {"error": "Subscription storage unavailable"})
+            self._send_json(503, {"error": "Subscription storage unavailable"})
             return
-        self._send_push_json(200, {"ok": True})
+        self._send_json(200, {"ok": True})
+
+    def _set_cloud_reviews(self) -> None:
+        cloud = self.cloud_sync
+        if cloud is None:
+            self._send_json(503, {"error": "GCP is unavailable on Edge."})
+            return
+        code = self.headers.get("X-Setup-Code", "")
+        if not self.cloud_review_setup_code or not compare_digest(code.encode(), self.cloud_review_setup_code.encode()):
+            self._send_json(403, {"error": "Invalid Edge setup code."})
+            return
+        if self.headers.get_content_type() != "application/json":
+            self._send_json(415, {"error": "Expected a JSON mode setting."})
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 256:
+                raise ValueError("Invalid setting length")
+            body = json.loads(self.rfile.read(length))
+            if not isinstance(body, dict) or not isinstance(body.get("enabled"), bool):
+                raise ValueError("Missing mode setting")
+        except (ValueError, OSError):
+            self._send_json(400, {"error": "Choose a valid analysis mode."})
+            return
+        try:
+            cloud.set_enabled(body["enabled"])
+        except OSError:
+            self._send_json(503, {"error": "Edge could not save the analysis mode."})
+            return
+        self._send_json(200, {"enabled": cloud.enabled})
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
@@ -400,6 +431,8 @@ class EdgeStatusHandler(BaseHTTPRequestHandler):
             self._push_subscription("enroll")
         elif path == "/push/subscription-status":
             self._push_subscription("status")
+        elif path == "/cloud-review":
+            self._set_cloud_reviews()
         else:
             self.send_error(404)
 
@@ -416,7 +449,7 @@ class EdgeStatusHandler(BaseHTTPRequestHandler):
         baby_id = qs.get("baby_id", ["baby_1"])[0]
 
         if path == "/push/config":
-            self._send_push_json(200, {"publicKey": self.web_push.public_key if self.web_push else None})
+            self._send_json(200, {"publicKey": self.web_push.public_key if self.web_push else None})
             return
 
         if path.startswith("/media/"):
@@ -436,7 +469,9 @@ class EdgeStatusHandler(BaseHTTPRequestHandler):
                 all_events = [self.cloud_sync.with_review(event) for event in all_events]
             data = {
                 "status": "ok",
-                "cloud_reviews_enabled": self.cloud_sync is not None,
+                "cloud_reviews_available": self.cloud_sync is not None,
+                "cloud_reviews_enabled": self.cloud_sync is not None and self.cloud_sync.enabled,
+                "cloud_review_setup_configured": bool(self.cloud_review_setup_code),
                 "babies": {bid: p._latest_status for bid, p in self.pipelines.items()},
                 "recent_events": all_events,
             }
@@ -521,6 +556,7 @@ def main() -> None:
     EdgeStatusHandler.event_store = event_store
     EdgeStatusHandler.web_push = web_push
     EdgeStatusHandler.cloud_sync = cloud_sync
+    EdgeStatusHandler.cloud_review_setup_code = os.environ.get("WEB_PUSH_SETUP_CODE", "")
     status_port = int(os.environ.get("EDGE_STATUS_PORT", "8095"))
     server = ThreadingHTTPServer(("0.0.0.0", status_port), EdgeStatusHandler)
     print(f"[EdgeNode] Telemetry server listening on http://0.0.0.0:{status_port}/status")

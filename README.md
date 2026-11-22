@@ -58,11 +58,15 @@ The deployment script defaults to project `lullabai-twins`, deployment account `
 
    On a headless Linux host, add `--no-browser` to the login command and follow the remote sign-in instructions it prints. For an unattended setup with an identity provider, set `LULLABAI_GCP_ADC_FILE` to a credential configuration readable inside the container. Mount any credential files it references at the corresponding container paths. [Workload Identity Federation](https://docs.cloud.google.com/iam/docs/workload-identities)
 
-3. From `edge/`, start the GCP-enabled detector. This uploads new event recordings from the connected cameras. Open a new event in the Linux dashboard to see the review. Use only the base Compose file to return to local mode.
+3. Set `WEB_PUSH_SETUP_CODE` in `edge/.env` if you do not already have an Edge setup code. You can generate one with `openssl rand -hex 24`. From `edge/`, start the detector with access to GCP.
 
    ```bash
    docker compose -f docker-compose.yml -f docker-compose.gcp.yml up -d --build
    ```
+
+4. Open **Settings → Event analysis** from the dashboard on HTTPS or localhost. Choose **GCP review** or **Local only**, enter the Edge setup code, and select **Apply mode**. The preference applies to both beds and persists across restarts. A fresh Edge installation starts in **Local only**.
+
+**GCP review** uploads new events and shows Gemini's results in **Recent events**. **Local only** stops new uploads and cloud polling. Events recorded in Local only mode and unfinished reviews from an earlier session stay out of the upload queue when GCP is re-enabled. Previously submitted jobs can still finish, and existing cloud storage and other deployed resources can still incur charges. [Cloud Run pricing](https://cloud.google.com/run/pricing) · [Cloud Storage pricing](https://cloud.google.com/storage/pricing)
 
 ## เริ่มใช้งานด้วยกล้อง Tapo
 

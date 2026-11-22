@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -16,6 +17,7 @@ sys.path.insert(0, str(ROOT / "edge" / "mock-camera"))
 
 from audio_cry import AudioCryDetector, AudioDetectionResult, vocalization_score  # noqa: E402
 from breathing_band import BreathingBandTracker  # noqa: E402
+from cloud_sync import CloudSyncClient  # noqa: E402
 from cv_compat import cv2  # noqa: E402
 from local_events import LocalEventStore  # noqa: E402
 from main import BabyMonitorPipeline  # noqa: E402
@@ -31,6 +33,39 @@ SAMPLE_DOG_HELD_TP260 = ROOT / "edge" / "assets" / "sample_dog_held_tp260.jpg"
 SAMPLE_TP260_PLAYPEN_DOG1 = ROOT / "edge" / "assets" / "sample_tp260_playpen_dog1.jpg"
 SAMPLE_TP260_PLAYPEN_DOG2 = ROOT / "edge" / "assets" / "sample_tp260_playpen_dog2.jpg"
 SAMPLE_TP260_PLAYPEN_EMPTY = ROOT / "edge" / "assets" / "sample_tp260_playpen_empty.jpg"
+
+
+def test_cloud_review_mode_persists_and_skips_events_from_earlier_modes(tmp_path: Path) -> None:
+    def event(event_id: str) -> dict:
+        return {
+            "event_id": event_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "trigger_type": "CRY",
+            "media": {"local_video_path": f"/media/{event_id}.mp4"},
+        }
+
+    store = LocalEventStore(tmp_path)
+    cloud = CloudSyncClient(store, firestore=None, bucket=None)
+    assert not cloud.enabled
+    local_event = event("evt_123_abcd01")
+    cloud.set_enabled(True)
+    assert CloudSyncClient(store, firestore=None, bucket=None).enabled
+    cloud.enqueue(local_event)
+    assert "cloud_review" not in local_event
+
+    pending = event("evt_124_abcd02")
+    cloud.enqueue(pending)
+    assert pending["cloud_review"] == "PENDING"
+    marker = cloud.queue / pending["event_id"]
+    cloud.set_enabled(False)
+    assert not CloudSyncClient(store, firestore=None, bucket=None).enabled
+    assert "cloud_review" not in cloud.with_review(pending)
+    cloud.set_enabled(True)
+    cloud._sync(marker)
+    assert not marker.exists()
+    stored = store.load(pending["event_id"])
+    assert stored is not None and "cloud_review" not in stored
+    assert stored["media"] == pending["media"]
 
 
 def test_detect_pomeranian_dog_in_playpen_and_reject_empty_playpen() -> None:
