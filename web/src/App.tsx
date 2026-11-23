@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { disableBackgroundPush, enableBackgroundPush, prepareBackgroundPush, type BackgroundPushSetup } from "./backgroundPush";
 import "./dashboard.css";
 import { CloudReviewSettings, type CloudReviewStatus } from "./components/CloudReviewSettings";
+import { VideoRetentionSettings } from "./components/VideoRetentionSettings";
 import { EventFeed } from "./components/EventFeed";
 import { LivePlayer } from "./components/LivePlayer";
 import { SafetyBanner } from "./components/SafetyBanner";
@@ -58,6 +59,7 @@ interface EdgeStatus {
   cloud_reviews_available?: boolean;
   cloud_reviews_enabled?: boolean;
   cloud_review_setup_configured?: boolean;
+  video_retention_days?: number | null;
   babies?: Partial<Record<BedId, {
     updated_at?: string;
     edge_metrics?: EdgeMetrics & { band_bbox_pct?: BabyProfile["band_bbox_pct"]; face_cover_suspected?: boolean };
@@ -84,6 +86,7 @@ export function App() {
   const [showDetection, setShowDetection] = useState(true);
   const [connection, setConnection] = useState("");
   const [cloudReview, setCloudReview] = useState<CloudReviewStatus | null>(null);
+  const [videoRetention, setVideoRetention] = useState<number | null>();
   const [simulation, setSimulation] = useState<{ bed: BedId; trigger: SimulatedTrigger } | null>(null);
   const [simulationFeedback, setSimulationFeedback] = useState<{ bed: BedId; pending: boolean; message: string } | null>(null);
   const [mockFeedVersion, setMockFeedVersion] = useState(0);
@@ -177,6 +180,7 @@ export function App() {
         const data: EdgeStatus | undefined = response.ok ? await response.json() : undefined;
         if (controller.signal.aborted) return;
         updateBabies(data?.babies);
+        setVideoRetention(data?.video_retention_days);
         setCloudReview(data ? {
           available: data.cloud_reviews_available === true,
           enabled: data.cloud_reviews_enabled === true,
@@ -210,6 +214,7 @@ export function App() {
         if (!controller.signal.aborted) {
           updateBabies();
           setCloudReview(null);
+          setVideoRetention(undefined);
         }
       } finally {
         polling = false;
@@ -386,6 +391,8 @@ export function App() {
                 <CloudReviewSettings status={cloudReview} onChange={(enabled) => {
                   setCloudReview((status) => status && { ...status, enabled });
                 }} />
+                <VideoRetentionSettings days={videoRetention} setupConfigured={cloudReview?.setupConfigured === true}
+                  onChange={setVideoRetention} />
                 <details className="menu-detail">
                   <summary>Connection details</summary>
                   <dl>

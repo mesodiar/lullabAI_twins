@@ -48,15 +48,15 @@ export function CloudReviewSettings({ status, onChange }: CloudReviewSettingsPro
   }
 
   return (
-    <details className="menu-detail cloud-review">
+    <details className="menu-detail edge-setting">
       <summary>
         <span>Event analysis</span>
-        <span className="cloud-review-status">
+        <span className="edge-setting-status">
           <strong>{status ? status.enabled ? "GCP review" : "Local only" : "Edge unavailable"}</strong>
           <ChevronDown aria-hidden="true" />
         </span>
       </summary>
-      <form className="cloud-review-form" onSubmit={save}>
+      <form className="edge-setting-form" onSubmit={save}>
         <label>
           Analysis mode
           <select

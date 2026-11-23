@@ -67,6 +67,7 @@ export interface LullabAIEvent {
     local_video_path?: string;
     local_snapshot_path?: string;
     local_video_has_audio?: boolean;
+    local_video_unavailable?: boolean;
   };
   ai_analysis: AIAnalysis | null;
 }

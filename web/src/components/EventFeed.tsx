@@ -68,6 +68,7 @@ export function EventFeed({ events, edgeBaseUrl }: EventFeedProps) {
               <div className="event-detail">
                 {event.cloud_review === "PENDING" && <p>Gemini review pending.</p>}
                 {event.cloud_review === "UNAVAILABLE" && <p>Gemini review unavailable.</p>}
+                {event.media?.local_video_unavailable && <p>Video is no longer stored on Edge.</p>}
                 {analysis?.title_th && <p className="event-result" lang="th">{analysis.title_th}</p>}
                 <p lang={analysis?.reason_hypothesis_th ? "th" : undefined}>
                   {analysis?.reason_hypothesis_th || (petCover
