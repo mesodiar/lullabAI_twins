@@ -5,6 +5,7 @@ import "./dashboard.css";
 import { CloudReviewSettings, type CloudReviewStatus } from "./components/CloudReviewSettings";
 import { VideoRetentionSettings } from "./components/VideoRetentionSettings";
 import { EventFeed } from "./components/EventFeed";
+import { HomeScreenInstall } from "./components/HomeScreenInstall";
 import { LivePlayer } from "./components/LivePlayer";
 import { SafetyBanner } from "./components/SafetyBanner";
 import { SleepSummary } from "./components/SleepSummary";
@@ -429,6 +430,7 @@ export function App() {
           petCoverSuspected={!simulatedTrigger && activeBaby.petCoverSuspected}
           onViewCamera={viewCamera}
         />
+        <HomeScreenInstall />
         <LivePlayer
           key={`camera-${selectedBabyId}`}
           baby={activeBaby}

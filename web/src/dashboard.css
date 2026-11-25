@@ -104,6 +104,10 @@ input { accent-color: var(--app-accent); }
 .menu-button:hover { background: var(--app-active); }
 .menu-button:disabled { opacity: .65; cursor: default; }
 
+.home-screen-install { grid-column: 1 / -1; }
+.home-screen-button { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding-inline: 12px; }
+.home-screen-install > p { margin-top: 6px; }
+
 .dashboard {
   display: grid;
   grid-template-columns: minmax(0, 1.92fr) minmax(0, 1fr);
