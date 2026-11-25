@@ -94,3 +94,62 @@ export interface BabyProfile {
   last_heartbeat_at?: string;
 }
 
+export type SleepQuality = "RESTFUL" | "FAIR" | "RESTLESS" | "INSUFFICIENT_DATA";
+
+export interface SleepSummaryStats {
+  total_events: number;
+  cry_count: number;
+  dog_vocalization_count: number;
+  motion_count: number;
+  safety_alert_count: number;
+  longest_quiet_minutes: number;
+  longest_quiet_start: string;
+  longest_quiet_end: string;
+  cross_bed_wakeups: number;
+}
+
+export interface HourlyActivityBucket {
+  hour_start: string;
+  label: string;
+  total: number;
+  sound: number;
+  safety: number;
+  motion: number;
+}
+
+export interface SleepSummaryAI {
+  sleep_quality: SleepQuality;
+  headline_th: string;
+  summary_th: string;
+  key_patterns_th: string[];
+  twins_insight_th: string | null;
+  recommendations_th: string[];
+}
+
+export interface SavedSleepSummary {
+  summary_id: string | null;
+  created_at: string | null;
+  analyzed_at: string | null;
+  status: "LOCAL_ONLY" | "PENDING_AI" | "COMPLETED" | "UNAVAILABLE";
+  ai_summary: SleepSummaryAI | null;
+}
+
+export interface SleepSummaryResponse {
+  baby_id: string;
+  window_hours: number;
+  window_start: string;
+  window_end: string;
+  subject_mode: SubjectMode;
+  stats: SleepSummaryStats;
+  hourly_activity: HourlyActivityBucket[];
+  other_bed: {
+    baby_id: string;
+    total_events: number;
+    disturbance_count: number;
+  };
+  local_summary: SleepSummaryAI;
+  saved_summary: SavedSleepSummary | null;
+  cloud_reviews_available: boolean;
+  cloud_reviews_enabled: boolean;
+}
+

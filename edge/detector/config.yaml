@@ -12,6 +12,15 @@ global:
     BREATHING_ANOMALY: 25
     MOTION: 60
 
+  # Minimum sustained duration (seconds) before uploading clips to Vertex AI review.
+  # Safety alerts (BAND_ROLLOVER, BREATHING_ANOMALY) always upload immediately.
+  cloud_review_min_duration_seconds:
+    CRY: 10.0
+    MOTION: 10.0
+    BAND_ROLLOVER: 0.0
+    BREATHING_ANOMALY: 0.0
+  cloud_review_grace_seconds: 2.5
+
   # Frame processing rate (Hz) per camera stream
   target_fps: 12
   pre_roll_seconds: 4.0

@@ -14,6 +14,7 @@ from notifier import CloudNotifier
 
 SUPPORTED_TRIGGERS = frozenset({"CRY", "MOTION", "BAND_ROLLOVER", "BREATHING_ANOMALY"})
 EVENT_OBJECT = re.compile(r"events/(baby_[12])/(evt_[0-9]+_[0-9a-f]{6})(?:\.mp4|_thumb\.jpg)")
+SUMMARY_OBJECT = re.compile(r"summaries/(sum_[0-9]+_[0-9a-f]{6})\.json")
 
 
 class System2AnalyzerService:
@@ -39,6 +40,19 @@ class System2AnalyzerService:
         gcs_uri = f"gs://{bucket}/{object_name}" if bucket and object_name else None
 
         if self.events_bucket:
+            summary_match = SUMMARY_OBJECT.fullmatch(object_name)
+            if summary_match is not None:
+                summary_id = summary_match[1]
+                if bucket != self.events_bucket or metadata.get("summary_id") != summary_id:
+                    return {"status": "skipped_unrecognized_object"}
+                summary_doc = self.notifier.load_sleep_summary(summary_id)
+                if not summary_doc or summary_doc.get("gcs_uri") != gcs_uri:
+                    return {"status": "skipped_unrecognized_summary"}
+                if summary_doc.get("status") != "PENDING_AI":
+                    return {"status": "already_summarized", "summary_id": summary_id}
+                analysis = self.analyzer.summarize_sleep(summary_doc.get("payload") or {})
+                return self.notifier.finalize_sleep_summary(summary_id, analysis)
+
             match = EVENT_OBJECT.fullmatch(object_name)
             if bucket != self.events_bucket or match is None or metadata.get("event_id") != match[2]:
                 return {"status": "skipped_unrecognized_object"}
@@ -59,6 +73,14 @@ class System2AnalyzerService:
             mime_type = "video/mp4" if object_name.endswith(".mp4") else "image/jpeg"
             analysis = self.analyzer.analyze_event(metadata=metadata, gcs_uri=gcs_uri, mime_type=mime_type)
             return self.notifier.finalize_event(event_id, baby_id, event["trigger_type"], analysis)
+
+        summary_match = SUMMARY_OBJECT.fullmatch(object_name)
+        if summary_match is not None:
+            summary_id = summary_match[1]
+            summary_doc = self.notifier.load_sleep_summary(summary_id) or {}
+            payload = summary_doc.get("payload") or metadata.get("payload") or {}
+            analysis = self.analyzer.summarize_sleep(payload)
+            return self.notifier.finalize_sleep_summary(summary_id, analysis)
 
         trigger_type = str(metadata.get("trigger_type") or "").upper()
         if trigger_type == "PERIODIC_CHECK":
@@ -134,6 +156,13 @@ class System2AnalyzerService:
             analysis=analysis,
         )
 
+    def handle_local_sleep_summary(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Processes a direct local sleep summary request during local testing."""
+        summary_id = str(body.get("summary_id") or "sum_local")
+        payload = body.get("payload") or {}
+        analysis = self.analyzer.summarize_sleep(payload)
+        return self.notifier.finalize_sleep_summary(summary_id, analysis)
+
 
 service = System2AnalyzerService()
 
@@ -155,6 +184,10 @@ try:
         @app.post("/analyze-local")
         def local_webhook_endpoint(body: dict[str, Any]) -> dict[str, Any]:
             return service.handle_local_webhook(body)
+
+        @app.post("/summarize-local")
+        def local_summary_endpoint(body: dict[str, Any]) -> dict[str, Any]:
+            return service.handle_local_sleep_summary(body)
 
 except ImportError:
     app = None

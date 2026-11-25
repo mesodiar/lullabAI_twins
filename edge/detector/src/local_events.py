@@ -5,19 +5,85 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+import stat
 import subprocess
 import tempfile
+import threading
+import time
 from typing import Any
 
 RECENT_EVENT_LIMIT = 15
 EVENT_ID = re.compile(r"evt_[0-9]+_[0-9a-f]{6}")
 MEDIA_NAME = re.compile(r"evt_[0-9]+_[0-9a-f]{6}(?:\.mp4|_thumb\.jpg)")
+VIDEO_RETENTION_OPTIONS = (1, 3, 7, 14, 30, 90)
+RETENTION_CHECK_INTERVAL = 60 * 60
 
 
 class LocalEventStore:
     def __init__(self, directory: str | Path = "local_events") -> None:
         self.directory = Path(directory)
         self.media_dir = self.directory / "media"
+        self._retention_file = self.directory / "video-retention.json"
+        self._retention_lock = threading.Lock()
+        self._retention_changed = threading.Event()
+        self.video_retention_days: int | None = None
+        try:
+            days = json.loads(self._retention_file.read_text(encoding="utf-8"))
+            if type(days) is int and days in VIDEO_RETENTION_OPTIONS:
+                self.video_retention_days = days
+        except (OSError, ValueError):
+            pass
+
+    def set_video_retention(self, days: int | None) -> None:
+        if days is not None and (type(days) is not int or days not in VIDEO_RETENTION_OPTIONS):
+            raise ValueError("Invalid video retention")
+        with self._retention_lock:
+            self.directory.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(dir=self.directory) as directory:
+                staged = Path(directory) / self._retention_file.name
+                staged.write_text(json.dumps(days), encoding="utf-8")
+                staged.replace(self._retention_file)
+            self.video_retention_days = days
+        self._retention_changed.set()
+
+    def run_video_retention(self) -> None:
+        while True:
+            self._retention_changed.clear()
+            try:
+                self.prune_videos()
+            except OSError as exc:
+                print(f"[Edge] Video retention could not scan storage ({type(exc).__name__}).")
+            self._retention_changed.wait(RETENTION_CHECK_INTERVAL)
+
+    def prune_videos(self) -> None:
+        with self._retention_lock:
+            days = self.video_retention_days
+            if days is None or self.media_dir.is_symlink():
+                return
+            cutoff = time.time() - days * 86400
+            for path in self.media_dir.glob("*.mp4"):
+                if not MEDIA_NAME.fullmatch(path.name):
+                    continue
+                try:
+                    info = path.lstat()
+                    if stat.S_ISREG(info.st_mode) and info.st_mtime <= cutoff:
+                        path.unlink()
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    print(f"[Edge] Could not expire {path.name} ({type(exc).__name__}).")
+
+    def with_available_video(self, event: dict[str, Any]) -> dict[str, Any]:
+        media = event.get("media") or {}
+        video = media.get("local_video_path")
+        if not isinstance(video, str) or not video.startswith("/media/"):
+            return event
+        if self.media_path(video.removeprefix("/media/")) is not None:
+            return event
+        available = {**media, "local_video_unavailable": True}
+        available.pop("local_video_path", None)
+        available.pop("local_video_has_audio", None)
+        return {**event, "media": available}
 
     def save(self, event: dict[str, Any]) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)

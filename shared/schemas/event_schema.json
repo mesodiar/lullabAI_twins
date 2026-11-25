@@ -118,7 +118,8 @@
         "signed_snapshot_url": { "type": ["string", "null"] },
         "local_video_path": { "type": "string" },
         "local_snapshot_path": { "type": "string" },
-        "local_video_has_audio": { "type": "boolean" }
+        "local_video_has_audio": { "type": "boolean" },
+        "local_video_unavailable": { "type": "boolean" }
       }
     },
     "ai_analysis": {

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -11,6 +12,7 @@ import time
 from typing import Any, Callable, TypeVar
 
 from local_events import LocalEventStore
+from sleep_summary import SleepSummaryStore
 
 SUPPORTED_TRIGGERS = frozenset({"CRY", "MOTION", "BAND_ROLLOVER", "BREATHING_ANOMALY"})
 Result = TypeVar("Result")
@@ -20,15 +22,36 @@ class CloudReviewDisabled(Exception):
     """The event belongs to an earlier analysis mode."""
 
 
+def should_notify_for_ai_review(review_status: str | None, ai_analysis: dict[str, Any] | None) -> bool:
+    """Return True only when Vertex AI confirms an actionable, non-false-alarm event."""
+    if not isinstance(ai_analysis, dict):
+        return False
+    if review_status == "FALSE_ALARM_SUPPRESSED" or ai_analysis.get("is_false_alarm") is True:
+        return False
+    if ai_analysis.get("safety_alert") is True:
+        return True
+    urgency = str(ai_analysis.get("urgency") or "").upper()
+    return urgency in ("MEDIUM", "HIGH", "CRITICAL")
+
+
 class CloudSyncClient:
-    def __init__(self, store: LocalEventStore, firestore: Any, bucket: Any) -> None:
+    def __init__(
+        self,
+        store: LocalEventStore,
+        firestore: Any,
+        bucket: Any,
+        web_push: Any | None = None,
+    ) -> None:
         self.store = store
+        self.summary_store = SleepSummaryStore(store)
         self.firestore = firestore
         self.bucket = bucket
+        self.web_push = web_push
         self.queue = store.directory / ".cloud_pending"
         self.queue.mkdir(parents=True, exist_ok=True)
         self._mode_file = store.directory / "cloud-review-mode"
         self._mode_lock = threading.Lock()
+        self._wake = threading.Event()
         self._enabled_since: datetime | None = None
         try:
             saved = datetime.fromisoformat(self._mode_file.read_text(encoding="utf-8").strip())
@@ -40,20 +63,28 @@ class CloudSyncClient:
             event = store.load(pending.stem)
             if event and event.get("cloud_review") == "PENDING":
                 (self.queue / pending.stem).touch()
+        if self.summary_store.summaries_dir.is_dir():
+            for pending in self.summary_store.summaries_dir.glob("baby_*_*h.json"):
+                try:
+                    summary = json.loads(pending.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if isinstance(summary, dict) and summary.get("status") == "PENDING_AI" and summary.get("summary_id"):
+                    (self.queue / str(summary["summary_id"])).touch()
 
     @classmethod
-    def from_env(cls, store: LocalEventStore) -> CloudSyncClient | None:
+    def from_env(cls, store: LocalEventStore, web_push: Any | None = None) -> CloudSyncClient | None:
         if os.environ.get("LULLABAI_GCP_ENABLED") != "1":
             return None
 
         try:
             from google.cloud import firestore, storage
 
-            project = os.environ.get("GCP_PROJECT_ID", "lullabai-twins")
+            project = os.environ.get("GCP_PROJECT_ID", "twins-monitor")
             database = os.environ.get("GCP_FIRESTORE_DATABASE", "lullabai-events")
             bucket = os.environ.get("GCS_EVENTS_BUCKET", f"{project}-lullabai-events")
             client = cls(store, firestore.Client(project=project, database=database),
-                         storage.Client(project=project).bucket(bucket))
+                         storage.Client(project=project).bucket(bucket), web_push=web_push)
         except Exception as exc:
             print(f"[CloudSync] Cloud review unavailable ({type(exc).__name__}).")
             return None
@@ -108,8 +139,21 @@ class CloudSyncClient:
             return stored
         return event
 
+    def enqueue_sleep_summary(self, summary_doc: dict[str, Any]) -> dict[str, Any]:
+        created = datetime.fromisoformat(summary_doc["created_at"])
+        if not self._eligible(created):
+            self.summary_store.save_summary(summary_doc)
+            return summary_doc
+        pending = {**summary_doc, "status": "PENDING_AI"}
+        self.summary_store.save_summary(pending)
+        (self.queue / pending["summary_id"]).touch()
+        self._wake.set()
+        return pending
+
     def _run(self) -> None:
         while True:
+            self._wake.clear()
+            has_pending_summaries = False
             try:
                 for marker in sorted(self.queue.glob("evt_*")):
                     try:
@@ -117,10 +161,81 @@ class CloudSyncClient:
                     except CloudReviewDisabled:
                         # A mode change interrupted this event. Remove the pending flag on the next pass.
                         continue
+                for marker in sorted(self.queue.glob("sum_*")):
+                    try:
+                        self._sync_summary(marker)
+                    except CloudReviewDisabled:
+                        continue
+                has_pending_summaries = any(self.queue.glob("sum_*"))
             except Exception as exc:
                 # Let SDKs report failures on the next pass without logging media or credentials.
                 print(f"[CloudSync] Will retry cloud review ({type(exc).__name__}).")
-            time.sleep(15)
+            self._wake.wait(3 if has_pending_summaries else 15)
+
+    def _sync_summary(self, marker: Path) -> None:
+        summary = self.summary_store.find_by_id(marker.name)
+        if summary is None or summary.get("status") != "PENDING_AI":
+            marker.unlink(missing_ok=True)
+            return
+
+        created = datetime.fromisoformat(summary["created_at"])
+        if not self._eligible(created):
+            self.summary_store.save_summary({**summary, "status": "LOCAL_ONLY"})
+            marker.unlink(missing_ok=True)
+            return
+
+        if datetime.now(created.tzinfo) - created >= timedelta(hours=1):
+            self.summary_store.save_summary({**summary, "status": "UNAVAILABLE"})
+            marker.unlink(missing_ok=True)
+            return
+
+        from google.api_core.exceptions import AlreadyExists, PreconditionFailed
+
+        summary_id = marker.name
+        ref = self.firestore.collection("sleep_summaries").document(summary_id)
+        blob = self.bucket.blob(f"summaries/{summary_id}.json")
+        if marker.stat().st_size == 0:
+            document = {
+                "summary_id": summary_id,
+                "baby_id": summary["baby_id"],
+                "window_hours": summary["window_hours"],
+                "created_at": summary["created_at"],
+                "status": "PENDING_AI",
+                "expires_at": created + timedelta(days=7),
+                "gcs_uri": f"gs://{self.bucket.name}/{blob.name}",
+                "payload": summary.get("payload") or {},
+            }
+            try:
+                self._cloud_call(created, ref.create, document, timeout=10)
+            except AlreadyExists:
+                pass
+
+            blob.metadata = {"summary_id": summary_id}
+            trigger_bytes = json.dumps({"summary_id": summary_id}).encode("utf-8")
+            try:
+                self._cloud_call(
+                    created,
+                    blob.upload_from_string,
+                    trigger_bytes,
+                    content_type="application/json",
+                    if_generation_match=0,
+                    timeout=15,
+                )
+            except PreconditionFailed:
+                pass
+            marker.write_text("uploaded", encoding="utf-8")
+
+        result = self._cloud_call(created, ref.get, timeout=10).to_dict() or {}
+        if result.get("status") == "COMPLETED" and result.get("ai_summary"):
+            completed = {
+                **summary,
+                "status": "COMPLETED",
+                "analyzed_at": result.get("analyzed_at"),
+                "ai_summary": result["ai_summary"],
+            }
+            completed.pop("payload", None)
+            self.summary_store.save_summary(completed)
+            marker.unlink(missing_ok=True)
 
     def _sync(self, marker: Path) -> None:
         event = self.store.load(marker.name)
@@ -174,6 +289,16 @@ class CloudSyncClient:
 
         review = self._cloud_call(created, ref.get, timeout=10).to_dict() or {}
         if review.get("status") in ("ANALYZED", "FALSE_ALARM_SUPPRESSED") and review.get("ai_analysis"):
-            self.store.save({**event, "cloud_review": "REVIEWED", "status": "ANALYZED",
-                             "analyzed_at": review["analyzed_at"], "ai_analysis": review["ai_analysis"]})
+            review_status = str(review["status"])
+            ai_analysis = review["ai_analysis"]
+            reviewed_event = {
+                **event,
+                "cloud_review": "REVIEWED",
+                "status": review_status,
+                "analyzed_at": review["analyzed_at"],
+                "ai_analysis": ai_analysis,
+            }
+            self.store.save(reviewed_event)
             marker.unlink(missing_ok=True)
+            if self.web_push is not None and should_notify_for_ai_review(review_status, ai_analysis):
+                self.web_push.submit(reviewed_event)

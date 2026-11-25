@@ -9,6 +9,7 @@ const edgeProxy = {
   "/push": "http://127.0.0.1:8095",
   "/edge/cloud-review": settingsProxy,
   "/edge/video-retention": settingsProxy,
+  "/edge/sleep-summary": settingsProxy,
 };
 
 export default defineConfig({

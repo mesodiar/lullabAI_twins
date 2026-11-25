@@ -148,13 +148,21 @@ class WebPushService:
         title = EVENT_TITLES.get(trigger)
         if not title:
             return
+        ai = event.get("ai_analysis") or {}
         metrics = event.get("edge_metrics", {})
-        if trigger == "CRY" and metrics.get("audio_kind") == "DOG_VOCALIZATION":
-            title = "Possible dog vocalization"
-        elif trigger == "BAND_ROLLOVER" and metrics.get("face_cover_suspected"):
-            title = "Possible blanket over dog's face"
         bed = event["baby_id"]
-        payload = json.dumps({"id": event["event_id"], "bed": bed, "title": title, "body": BEDS.get(bed, bed)})
+        bed_label = BEDS.get(bed, bed)
+        if ai.get("title_th"):
+            title = str(ai["title_th"])
+            action = str(ai.get("recommended_action_th") or "").strip()
+            body = f"{bed_label} · {action}" if action else bed_label
+        else:
+            if trigger == "CRY" and metrics.get("audio_kind") == "DOG_VOCALIZATION":
+                title = "Possible dog vocalization"
+            elif trigger == "BAND_ROLLOVER" and metrics.get("face_cover_suspected"):
+                title = "Possible blanket over dog's face"
+            body = bed_label
+        payload = json.dumps({"id": event["event_id"], "bed": bed, "title": title, "body": body}, ensure_ascii=False)
         try:
             self.pending.put_nowait(payload)
         except Full:

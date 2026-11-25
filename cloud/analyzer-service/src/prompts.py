@@ -110,3 +110,70 @@ def build_event_prompt(metadata: dict[str, Any]) -> str:
         "ห้ามยืนยันว่าหายใจปกติหรือสรุปว่าปลอดภัยจากคลิปสั้น ๆ\n"
         "กรุณาวิเคราะห์ภาพ/วิดีโอที่แนบมานี้โดยไม่จำเป็นต้องมีแผ่นพันตัว และส่งคืนผลลัพธ์ตามโครงสร้าง SafetyAndSleepAnalysis"
     )
+
+
+class SleepSummaryAnalysis(BaseModel):
+    """Structured overnight / daily sleep summary returned by Vertex AI Gemini."""
+
+    sleep_quality: Literal["RESTFUL", "FAIR", "RESTLESS", "INSUFFICIENT_DATA"] = Field(
+        description="Overall sleep/rest quality during the requested window."
+    )
+    headline_th: str = Field(
+        description="Short Thai headline (max 80 chars) summarizing the sleep window at a glance."
+    )
+    summary_th: str = Field(
+        description="2-4 concise Thai sentences summarizing sleep rhythm, longest quiet stretch, cry/sound clusters, and any safety alerts."
+    )
+    key_patterns_th: list[str] = Field(
+        default_factory=list,
+        description="2-4 concise Thai bullet points noting peak disturbance hours, recurring triggers, or posture/cover observations.",
+    )
+    twins_insight_th: str | None = Field(
+        default=None,
+        description="Optional Thai insight comparing Bed 1 and Bed 2 or noting cross-bed wakeups when both beds have data; otherwise null.",
+    )
+    recommendations_th: list[str] = Field(
+        default_factory=list,
+        description="1-3 practical, supportive Thai suggestions for the next sleep window.",
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        if hasattr(self, "model_dump"):
+            return self.model_dump()  # type: ignore[no-any-return]
+        return self.dict()  # type: ignore[no-any-return]
+
+
+def build_sleep_summary_system_instruction(subject_mode: str = "BABY") -> str:
+    if subject_mode == "PET_TEST":
+        return (
+            "คุณคือผู้ช่วยสรุปผลการพักผ่อนและความปลอดภัยของ LullabAI Twins (โหมดทดสอบกับน้องหมา PET_TEST)\n"
+            "หน้าที่ของคุณคืออ่านข้อมูลเหตุการณ์ที่รวบรวมจาก Edge ในช่วงเวลาที่กำหนด แล้วสรุปเป็นภาษาไทยที่อ่านง่าย กระชับ และตรงตามข้อมูลจริง:\n"
+            "1. สรุปภาพรวมช่วงเวลาที่สงบยาวนานที่สุด ช่วงที่มีเสียงเห่า/คราง การขยับตัว หรือการแจ้งเตือนผ้าคลุมหน้า\n"
+            "2. ระบุรูปแบบเวลาที่เกิดเหตุการณ์บ่อย (key_patterns_th)\n"
+            "3. หากมีข้อมูลเทียบกับอีกเตียง/อีกจุด ให้สรุปความเชื่อมโยงใน twins_insight_th ถ้าไม่มีให้ใส่ null\n"
+            "4. ห้ามแต่งตัวเลขหรือเหตุการณ์ที่ไม่มีในข้อมูล หากไม่มีเหตุการณ์เลยให้ระบุว่าสงบหรือข้อมูลยังไม่เพียงพอ\n"
+            "5. ตอบกลับตาม JSON Schema SleepSummaryAnalysis เท่านั้น"
+        )
+
+    return (
+        "คุณคือผู้ช่วยสรุปผลการนอนของทารกแฝด LullabAI Twins สำหรับคุณพ่อคุณแม่ที่ต้องการอ่านสรุปตอนเช้าแบบรวดเร็ว\n"
+        "หน้าที่ของคุณคือวิเคราะห์ข้อมูลเหตุการณ์การนอน (เสียงร้อง, การขยับตัว, แจ้งเตือนความปลอดภัย, และผลวิเคราะห์คลิปก่อนหน้า) "
+        "แล้วสรุปเป็นภาษาไทยที่อบอุ่น กระชับ และอ้างอิงตามข้อมูลจริง:\n"
+        "1. ประเมินภาพรวมคุณภาพการนอน (`RESTFUL`, `FAIR`, `RESTLESS`, `INSUFFICIENT_DATA`) และช่วงเวลาที่หลับสงบยาวนานที่สุด\n"
+        "2. สรุปรูปแบบสำคัญ เช่น ช่วงเวลาที่ตื่นร้องบ่อย การขยับตัว หรือเหตุการณ์ความปลอดภัย (`key_patterns_th`)\n"
+        "3. ถ้ามีข้อมูลของแฝดอีกเตียง ให้วิเคราะห์ความเชื่อมโยง เช่น เตียงหนึ่งร้องแล้วปลุกอีกเตียงหรือไม่ (`twins_insight_th`) ถ้าไม่มีข้อมูลอีกเตียงให้ใส่ null\n"
+        "4. ให้คำแนะนำเชิงปฏิบัติที่อ่อนโยนและเป็นประโยชน์สำหรับรอบการนอนถัดไป (`recommendations_th`) โดยไม่อ้างการวินิจฉัยทางการแพทย์\n"
+        "5. ห้ามสร้างตัวเลขหรือเวลาที่ไม่มีในข้อมูล และตอบกลับตาม JSON Schema SleepSummaryAnalysis เท่านั้น"
+    )
+
+
+def build_sleep_summary_prompt(payload: dict[str, Any]) -> str:
+    import json
+
+    compact = json.dumps(payload, ensure_ascii=False, indent=2)
+    return (
+        "ข้อมูลสรุปเหตุการณ์จาก Edge Node สำหรับช่วงเวลาที่เลือก:\n"
+        f"{compact}\n\n"
+        "โปรดวิเคราะห์ข้อมูลด้านบนและสร้างรายงานสรุปผลการนอนตามโครงสร้าง SleepSummaryAnalysis "
+        "โดยระบุเวลาให้สอดคล้องกับ timezone ที่แนบมา (local_timezone) หากมี"
+    )

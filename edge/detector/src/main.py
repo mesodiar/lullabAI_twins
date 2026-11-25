@@ -28,10 +28,58 @@ from cv_compat import cv2
 from local_events import LocalEventStore, RECENT_EVENT_LIMIT
 from motion import MotionDetector, MotionResult
 from pet_cover import PetCoverDetector
+from sleep_summary import BED_IDS, DEFAULT_SUMMARY_WINDOW, SUMMARY_WINDOWS, SleepSummaryStore
 from stream_reader import RingBufferStreamReader
 from web_push import WebPushService, subscription_fields
 
 CV_ERROR = getattr(cv2, "error", RuntimeError)
+
+DEFAULT_CLOUD_MIN_DURATIONS: dict[str, float] = {
+    "CRY": 10.0,
+    "MOTION": 10.0,
+    "BAND_ROLLOVER": 0.0,
+    "BREATHING_ANOMALY": 0.0,
+}
+
+
+class SustainedSignalTracker:
+    """Tracks continuous active duration per signal key, allowing brief pauses."""
+
+    def __init__(self, grace_seconds: float = 2.5) -> None:
+        self.grace_seconds = max(0.0, grace_seconds)
+        self._episodes: dict[str, tuple[float, float]] = {}
+        self._escalated: set[str] = set()
+
+    def update(self, key: str, active: bool, now: float) -> float:
+        episode = self._episodes.get(key)
+        if active:
+            if episode is None or (now - episode[1]) > self.grace_seconds:
+                self._episodes[key] = (now, now)
+                self._escalated.discard(key)
+                return 0.0
+            started_at, _ = episode
+            self._episodes[key] = (started_at, now)
+            return max(0.0, now - started_at)
+        if episode is not None and (now - episode[1]) > self.grace_seconds:
+            self._episodes.pop(key, None)
+            self._escalated.discard(key)
+        return 0.0
+
+    def duration(self, key: str, now: float) -> float:
+        episode = self._episodes.get(key)
+        if episode is None or (now - episode[1]) > self.grace_seconds:
+            return 0.0
+        return max(0.0, now - episode[0])
+
+    def mark_escalated(self, key: str) -> bool:
+        if key in self._escalated:
+            return False
+        self._escalated.add(key)
+        return True
+
+    def is_active(self, key: str, now: float) -> bool:
+        episode = self._episodes.get(key)
+        return episode is not None and (now - episode[1]) <= self.grace_seconds
 
 
 class BabyMonitorPipeline:
@@ -54,6 +102,16 @@ class BabyMonitorPipeline:
             "cooldowns",
             {"CRY": 30.0, "BAND_ROLLOVER": 25.0, "BREATHING_ANOMALY": 25.0, "MOTION": 60.0},
         )
+        self.cloud_min_durations: dict[str, float] = {
+            **DEFAULT_CLOUD_MIN_DURATIONS,
+            **{k: float(v) for k, v in (global_cfg.get("cloud_review_min_duration_seconds") or {}).items()},
+        }
+        self._sustained_tracker = SustainedSignalTracker(
+            grace_seconds=float(global_cfg.get("cloud_review_grace_seconds", 2.5))
+        )
+        self._episode_lock = threading.Lock()
+        self._episode_events: dict[str, dict[str, Any]] = {}
+        self._escalated_event_ids: set[str] = set()
         self.event_store = event_store
         self.web_push = web_push
         self.cloud_sync = cloud_sync
@@ -131,6 +189,57 @@ class BabyMonitorPipeline:
 
         return None
 
+    def _signal_key(self, trigger_type: str, audio_kind: str | None) -> str:
+        return (audio_kind or trigger_type) if trigger_type == "CRY" else trigger_type
+
+    def _update_sustained_signals(
+        self,
+        band_res: BandTrackingResult,
+        motion_res: MotionResult,
+        audio_res: AudioDetectionResult,
+        now: float,
+    ) -> None:
+        """Tracks active CRY/MOTION episodes and escalates to Vertex AI once sustained past threshold."""
+        active_cry_key = (audio_res.audio_kind or "CRY") if audio_res.cry_triggered else None
+        for cry_key in ("BABY_CRY", "DOG_VOCALIZATION", "CRY"):
+            duration = self._sustained_tracker.update(cry_key, active_cry_key == cry_key, now)
+            if not self._sustained_tracker.is_active(cry_key, now):
+                with self._episode_lock:
+                    self._episode_events.pop(cry_key, None)
+            elif duration >= self.cloud_min_durations.get("CRY", 10.0):
+                self._escalate_episode(cry_key, duration)
+
+        motion_active = bool(
+            band_res.subject_type != "ADULT"
+            and motion_res.motion_triggered
+            and band_res.subject_type in ("BABY", "PET")
+        )
+        motion_duration = self._sustained_tracker.update("MOTION", motion_active, now)
+        if not self._sustained_tracker.is_active("MOTION", now):
+            with self._episode_lock:
+                self._episode_events.pop("MOTION", None)
+        elif motion_duration >= self.cloud_min_durations.get("MOTION", 10.0):
+            self._escalate_episode("MOTION", motion_duration)
+
+    def _escalate_episode(self, signal_key: str, duration: float) -> None:
+        if not self._sustained_tracker.mark_escalated(signal_key):
+            return
+        with self._episode_lock:
+            event_doc = self._episode_events.get(signal_key)
+            if event_doc is None:
+                return
+            self._escalated_event_ids.add(event_doc["event_id"])
+            event_doc["edge_metrics"]["sustained_duration_s"] = round(duration, 1)
+            has_media = bool(event_doc.get("media"))
+            already_queued = "cloud_review" in event_doc
+        if has_media and not already_queued and self.cloud_sync is not None:
+            print(
+                f"[Edge:{self.baby_id}] ☁️ Escalating sustained {signal_key} "
+                f"({duration:.1f}s) to Vertex AI (id={event_doc['event_id']})"
+            )
+            self.event_store.save(event_doc)
+            self.cloud_sync.enqueue(event_doc)
+
     def step_once(self, frame_bgr: np.ndarray, audio_waveform: np.ndarray | None = None) -> dict[str, Any]:
         """Processes one frame (+ optional audio chunk) and returns current telemetry & any triggered event."""
         now = time.time()
@@ -146,6 +255,7 @@ class BabyMonitorPipeline:
             self._latest_audio = self.audio_detector.analyze_waveform(audio_waveform)
 
         audio_res = self._latest_audio
+        self._update_sustained_signals(band_res, motion_res, audio_res, now)
         trigger = self.evaluate_triggers(
             band_res, motion_res, audio_res, now, face_cover_suspected=face_cover_suspected
         )
@@ -207,13 +317,20 @@ class BabyMonitorPipeline:
         print(f"[Edge:{self.baby_id}] ⚡ Trigger={trigger_type} (id={event_id}) | Metrics={metrics}")
         self.recent_events.appendleft(event_doc)
 
+        signal_key = self._signal_key(trigger_type, metrics.get("audio_kind"))
+        min_duration = float(self.cloud_min_durations.get(trigger_type, 0.0))
+        immediate_cloud = min_duration <= 0.0
+        if not immediate_cloud:
+            with self._episode_lock:
+                self._episode_events[signal_key] = event_doc
+
         # Keep the pre-roll frames before the ring buffer advances during the alert.
         frames = self.reader.get_buffered_frames(through=started_at)
         try:
             self.event_store.save(event_doc)
         except OSError as exc:
             print(f"[Edge:{self.baby_id}] Could not save event {event_id}: {exc}")
-        if self.web_push is not None:
+        if self.web_push is not None and not (self.cloud_sync is not None and self.cloud_sync.enabled):
             self.web_push.submit(event_doc)
 
         deadline = started_at + self.post_roll_seconds
@@ -228,9 +345,11 @@ class BabyMonitorPipeline:
                         Path(tmp_dir), event_id=event_id, frames=frames, include_audio=trigger_type == "CRY"
                     )
                     media = self.event_store.save_media(clip_path, snap_path, audio_path)
-                    event_doc["media"] = media
+                    with self._episode_lock:
+                        event_doc["media"] = media
+                        should_enqueue = immediate_cloud or event_id in self._escalated_event_ids
                     self.event_store.save(event_doc)
-                    if self.cloud_sync is not None:
+                    if self.cloud_sync is not None and should_enqueue and "cloud_review" not in event_doc:
                         self.cloud_sync.enqueue(event_doc)
             except (OSError, ValueError, CV_ERROR) as exc:
                 print(f"[Edge:{self.baby_id}] Could not save media for {event_id}: {exc}")
@@ -277,16 +396,17 @@ class BabyMonitorPipeline:
 class EdgeStatusHandler(BaseHTTPRequestHandler):
     pipelines: dict[str, BabyMonitorPipeline] = {}
     event_store: LocalEventStore
+    summary_store: SleepSummaryStore | None = None
     web_push: WebPushService | None = None
     cloud_sync: CloudSyncClient | None = None
-    cloud_review_setup_code: str = ""
+    settings_setup_code: str = ""
 
     def log_message(self, format: str, *args) -> None:
         pass
 
     def _send_cors_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, HEAD, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Range")
 
     def _send_media(self, name: str, *, head_only: bool = False) -> None:
@@ -295,7 +415,12 @@ class EdgeStatusHandler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
 
-        with path.open("rb") as source:
+        try:
+            source = path.open("rb")
+        except FileNotFoundError:
+            self.send_error(404)
+            return
+        with source:
             size = os.fstat(source.fileno()).st_size
             start, end = 0, size - 1
             byte_range = self.headers.get("Range")
@@ -352,9 +477,11 @@ class EdgeStatusHandler(BaseHTTPRequestHandler):
         self._send_cors_headers()
         self.end_headers()
 
-    def _send_json(self, status: int, value: dict[str, Any]) -> None:
-        body = json.dumps(value).encode("utf-8")
+    def _send_json(self, status: int, value: dict[str, Any], *, cors: bool = False) -> None:
+        body = json.dumps(value, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
+        if cors:
+            self._send_cors_headers()
         self.send_header("Content-Type", "application/json")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
@@ -396,26 +523,35 @@ class EdgeStatusHandler(BaseHTTPRequestHandler):
             return
         self._send_json(200, {"ok": True})
 
-    def _set_cloud_reviews(self) -> None:
-        cloud = self.cloud_sync
-        if cloud is None:
-            self._send_json(503, {"error": "GCP is unavailable on Edge."})
-            return
+    def _read_settings_json(self) -> dict[str, Any] | None:
         code = self.headers.get("X-Setup-Code", "")
-        if not self.cloud_review_setup_code or not compare_digest(code.encode(), self.cloud_review_setup_code.encode()):
+        if not self.settings_setup_code or not compare_digest(code.encode(), self.settings_setup_code.encode()):
             self._send_json(403, {"error": "Invalid Edge setup code."})
-            return
+            return None
         if self.headers.get_content_type() != "application/json":
-            self._send_json(415, {"error": "Expected a JSON mode setting."})
-            return
+            self._send_json(415, {"error": "Expected a JSON setting."})
+            return None
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if not 0 < length <= 256:
                 raise ValueError("Invalid setting length")
             body = json.loads(self.rfile.read(length))
-            if not isinstance(body, dict) or not isinstance(body.get("enabled"), bool):
-                raise ValueError("Missing mode setting")
+            if not isinstance(body, dict):
+                raise ValueError("Expected a settings object")
         except (ValueError, OSError):
+            self._send_json(400, {"error": "Invalid settings request."})
+            return None
+        return body
+
+    def _set_cloud_reviews(self) -> None:
+        cloud = self.cloud_sync
+        if cloud is None:
+            self._send_json(503, {"error": "GCP is unavailable on Edge."})
+            return
+        body = self._read_settings_json()
+        if body is None:
+            return
+        if not isinstance(body.get("enabled"), bool):
             self._send_json(400, {"error": "Choose a valid analysis mode."})
             return
         try:
@@ -425,6 +561,84 @@ class EdgeStatusHandler(BaseHTTPRequestHandler):
             return
         self._send_json(200, {"enabled": cloud.enabled})
 
+    def _set_video_retention(self) -> None:
+        body = self._read_settings_json()
+        if body is None:
+            return
+        try:
+            self.event_store.set_video_retention(body["days"])
+        except (KeyError, ValueError):
+            self._send_json(400, {"error": "Choose a valid video retention period."})
+            return
+        except OSError:
+            self._send_json(503, {"error": "Edge could not save the video retention setting."})
+            return
+        self._send_json(200, {"days": self.event_store.video_retention_days})
+
+    def _get_summary_store(self) -> SleepSummaryStore:
+        if self.summary_store is None:
+            return SleepSummaryStore(self.event_store)
+        return self.summary_store
+
+    def _sleep_summary_response(self, baby_id: str, hours: int) -> dict[str, Any]:
+        store = self._get_summary_store()
+        digest = store.build_digest(baby_id, hours)
+        saved = store.load_saved(baby_id, hours)
+        saved_view = None
+        if saved is not None:
+            saved_view = {
+                "summary_id": saved.get("summary_id"),
+                "created_at": saved.get("created_at"),
+                "analyzed_at": saved.get("analyzed_at"),
+                "status": saved.get("status"),
+                "ai_summary": saved.get("ai_summary"),
+            }
+        return {
+            "baby_id": baby_id,
+            "window_hours": hours,
+            "window_start": digest["window_start"],
+            "window_end": digest["window_end"],
+            "subject_mode": digest["subject_mode"],
+            "stats": digest["stats"],
+            "hourly_activity": digest["hourly_activity"],
+            "other_bed": digest["other_bed"],
+            "local_summary": digest["local_summary"],
+            "saved_summary": saved_view,
+            "cloud_reviews_available": self.cloud_sync is not None,
+            "cloud_reviews_enabled": self.cloud_sync is not None and self.cloud_sync.enabled,
+        }
+
+    def _request_sleep_summary(self) -> None:
+        if self.headers.get_content_type() != "application/json":
+            self._send_json(415, {"error": "Expected a JSON request."}, cors=True)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 512:
+                raise ValueError("Invalid request length")
+            body = json.loads(self.rfile.read(length))
+            if not isinstance(body, dict):
+                raise ValueError("Expected an object")
+            baby_id = str(body.get("baby_id") or "baby_1")
+            hours = int(body.get("hours", DEFAULT_SUMMARY_WINDOW))
+            if baby_id not in BED_IDS or hours not in SUMMARY_WINDOWS:
+                raise ValueError("Invalid baby_id or hours")
+        except (ValueError, OSError):
+            self._send_json(400, {"error": "Choose a valid bed and time window."}, cors=True)
+            return
+
+        store = self._get_summary_store()
+        request_doc = store.create_request(baby_id, hours)
+        try:
+            if self.cloud_sync is not None and self.cloud_sync.enabled:
+                self.cloud_sync.enqueue_sleep_summary(request_doc)
+            else:
+                store.save_summary(request_doc)
+        except OSError:
+            self._send_json(503, {"error": "Edge could not save the sleep summary."}, cors=True)
+            return
+        self._send_json(200, self._sleep_summary_response(baby_id, hours), cors=True)
+
     def do_POST(self) -> None:
         path = urlparse(self.path).path
         if path == "/push/subscriptions":
@@ -433,6 +647,10 @@ class EdgeStatusHandler(BaseHTTPRequestHandler):
             self._push_subscription("status")
         elif path == "/cloud-review":
             self._set_cloud_reviews()
+        elif path == "/video-retention":
+            self._set_video_retention()
+        elif path == "/sleep-summary":
+            self._request_sleep_summary()
         else:
             self.send_error(404)
 
@@ -456,6 +674,17 @@ class EdgeStatusHandler(BaseHTTPRequestHandler):
             self._send_media(path.removeprefix("/media/"))
             return
 
+        if path == "/sleep-summary":
+            try:
+                hours = int(qs.get("hours", [str(DEFAULT_SUMMARY_WINDOW)])[0])
+                if baby_id not in BED_IDS or hours not in SUMMARY_WINDOWS:
+                    raise ValueError("Invalid parameters")
+            except ValueError:
+                self._send_json(400, {"error": "Choose a valid bed and time window."}, cors=True)
+                return
+            self._send_json(200, self._sleep_summary_response(baby_id, hours), cors=True)
+            return
+
         if path in ("/status", "/health"):
             self.send_response(200)
             self._send_cors_headers()
@@ -471,9 +700,10 @@ class EdgeStatusHandler(BaseHTTPRequestHandler):
                 "status": "ok",
                 "cloud_reviews_available": self.cloud_sync is not None,
                 "cloud_reviews_enabled": self.cloud_sync is not None and self.cloud_sync.enabled,
-                "cloud_review_setup_configured": bool(self.cloud_review_setup_code),
+                "cloud_review_setup_configured": bool(self.settings_setup_code),
+                "video_retention_days": self.event_store.video_retention_days,
                 "babies": {bid: p._latest_status for bid, p in self.pipelines.items()},
-                "recent_events": all_events,
+                "recent_events": [self.event_store.with_available_video(event) for event in all_events],
             }
             self.wfile.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
             return
@@ -539,8 +769,9 @@ def main() -> None:
 
     global_cfg = cfg.get("global", {})
     event_store = LocalEventStore()
+    threading.Thread(target=event_store.run_video_retention, name="video-retention", daemon=True).start()
     web_push = WebPushService.from_env(event_store.directory)
-    cloud_sync = CloudSyncClient.from_env(event_store)
+    cloud_sync = CloudSyncClient.from_env(event_store, web_push=web_push)
 
     pipelines: dict[str, BabyMonitorPipeline] = {}
     for baby_cfg in cfg.get("babies", []):
@@ -554,9 +785,10 @@ def main() -> None:
 
     EdgeStatusHandler.pipelines = pipelines
     EdgeStatusHandler.event_store = event_store
+    EdgeStatusHandler.summary_store = SleepSummaryStore(event_store)
     EdgeStatusHandler.web_push = web_push
     EdgeStatusHandler.cloud_sync = cloud_sync
-    EdgeStatusHandler.cloud_review_setup_code = os.environ.get("WEB_PUSH_SETUP_CODE", "")
+    EdgeStatusHandler.settings_setup_code = os.environ.get("WEB_PUSH_SETUP_CODE", "")
     status_port = int(os.environ.get("EDGE_STATUS_PORT", "8095"))
     server = ThreadingHTTPServer(("0.0.0.0", status_port), EdgeStatusHandler)
     print(f"[EdgeNode] Telemetry server listening on http://0.0.0.0:{status_port}/status")

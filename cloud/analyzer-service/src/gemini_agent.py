@@ -6,7 +6,14 @@ import os
 from pathlib import Path
 from typing import Any
 
-from prompts import SafetyAndSleepAnalysis, build_event_prompt, build_system_instruction
+from prompts import (
+    SafetyAndSleepAnalysis,
+    SleepSummaryAnalysis,
+    build_event_prompt,
+    build_sleep_summary_prompt,
+    build_sleep_summary_system_instruction,
+    build_system_instruction,
+)
 
 
 class GeminiSleepAnalyzer:
@@ -175,5 +182,105 @@ class GeminiSleepAnalyzer:
             title_th="ผลตรวจสอบไม่ชัดเจน",
             reason_hypothesis_th="ข้อมูลเหตุการณ์ไม่เพียงพอที่จะสรุปผล",
             recommended_action_th="เปิดดูกล้องเพื่อดูสถานะล่าสุด",
+        )
+
+    def summarize_sleep(self, payload: dict[str, Any]) -> SleepSummaryAnalysis:
+        """Generates a structured overnight/daily sleep summary via Vertex AI Gemini."""
+        if self._client is None:
+            return self._heuristic_sleep_summary(payload)
+
+        from google.genai import types
+
+        subject_mode = str(payload.get("subject_mode", "BABY"))
+        response = self._client.models.generate_content(
+            model=self.model_id,
+            contents=[build_sleep_summary_prompt(payload)],
+            config=types.GenerateContentConfig(
+                system_instruction=build_sleep_summary_system_instruction(subject_mode),
+                temperature=0.2,
+                response_mime_type="application/json",
+                response_schema=SleepSummaryAnalysis,
+            ),
+        )
+        if response.parsed is not None:
+            return SleepSummaryAnalysis.model_validate(response.parsed)
+        if response.text:
+            return SleepSummaryAnalysis.model_validate_json(response.text)
+        raise ValueError("Vertex AI returned no sleep summary")
+
+    @staticmethod
+    def _heuristic_sleep_summary(payload: dict[str, Any]) -> SleepSummaryAnalysis:
+        """Deterministic fallback summary for local testing without Vertex AI credentials."""
+        stats = payload.get("stats") or {}
+        total = int(stats.get("total_events") or 0)
+        cries = int(stats.get("cry_count") or 0)
+        dog_sounds = int(stats.get("dog_vocalization_count") or 0)
+        safety = int(stats.get("safety_alert_count") or 0)
+        quiet_mins = int(stats.get("longest_quiet_minutes") or 0)
+        window_hours = int(payload.get("window_hours") or 12)
+        subject_mode = str(payload.get("subject_mode", "BABY"))
+        cross_bed = int(stats.get("cross_bed_wakeups") or 0)
+        other_bed_events = int((payload.get("other_bed") or {}).get("total_events") or 0)
+
+        quiet_h, quiet_m = divmod(quiet_mins, 60)
+        quiet_str = f"{quiet_h} ชม. {quiet_m} นาที" if quiet_h else f"{quiet_m} นาที"
+        sound_total = cries + dog_sounds
+        subject_label = "น้องหมา" if subject_mode == "PET_TEST" else "น้อง"
+
+        if total == 0:
+            quality = "RESTFUL"
+            headline = f"ช่วง {window_hours} ชม.ที่ผ่านมาสงบดี ไม่มีเหตุการณ์แจ้งเตือน"
+            summary = f"ไม่พบเหตุการณ์เสียงร้องหรือแจ้งเตือนความปลอดภัยของ{subject_label}ในช่วง {window_hours} ชั่วโมงที่ผ่านมา"
+            patterns = [f"ช่วงสงบต่อเนื่องยาวนาน {quiet_str}"]
+            recs = ["สามารถติดตามตามปกติและตรวจเช็กมุมกล้องเป็นระยะได้"]
+        elif safety > 0 or sound_total >= 6:
+            quality = "RESTLESS"
+            headline = f"ตื่น/มีแจ้งเตือนค่อนข้างถี่ ({total} ครั้งใน {window_hours} ชม.)"
+            summary = (
+                f"ในช่วง {window_hours} ชั่วโมงที่ผ่านมา พบเหตุการณ์ทั้งหมด {total} ครั้ง "
+                f"(เสียง {sound_total} ครั้ง, แจ้งเตือนความปลอดภัย {safety} ครั้ง) "
+                f"ช่วงที่สงบต่อเนื่องนานที่สุดคือ {quiet_str}"
+            )
+            patterns = [
+                f"พบเสียงแจ้งเตือน {sound_total} ครั้ง และแจ้งเตือนความปลอดภัย {safety} ครั้ง",
+                f"ช่วงสงบต่อเนื่องยาวสุด {quiet_str}",
+            ]
+            recs = [
+                "ตรวจสอบคลิปช่วงที่มีแจ้งเตือนความปลอดภัยหรือเสียงถี่เพื่อหาสาเหตุ",
+                "จัดสภาพแวดล้อมและผ้าห่มในเปลให้เรียบร้อยก่อนรอบการนอนถัดไป",
+            ]
+        else:
+            quality = "FAIR"
+            headline = f"พักผ่อนได้พอใช้ มีเหตุการณ์ {total} ครั้ง (สงบสุด {quiet_str})"
+            summary = (
+                f"ในช่วง {window_hours} ชั่วโมงที่ผ่านมา {subject_label}มีเหตุการณ์ทั้งหมด {total} ครั้ง "
+                f"(เสียง {sound_total} ครั้ง) โดยมีช่วงสงบต่อเนื่องนานที่สุด {quiet_str}"
+            )
+            patterns = [
+                f"ช่วงสงบต่อเนื่องนานที่สุด {quiet_str}",
+                f"พบเหตุการณ์เสียง {sound_total} ครั้ง และไม่มีแจ้งเตือนความปลอดภัยร้ายแรง",
+            ]
+            recs = ["สังเกตช่วงเวลาที่มีเสียงร้องเพื่อปรับตารางกล่อมนอนให้สอดคล้องกัน"]
+
+        twins_insight = None
+        if other_bed_events > 0:
+            if cross_bed > 0:
+                twins_insight = (
+                    f"พบความเชื่อมโยงระหว่าง 2 เตียง {cross_bed} ครั้ง "
+                    f"(อีกเตียงมีเหตุการณ์ทั้งหมด {other_bed_events} ครั้งในช่วงเดียวกัน)"
+                )
+            else:
+                twins_insight = (
+                    f"อีกเตียงมีเหตุการณ์ {other_bed_events} ครั้งในช่วงเดียวกัน "
+                    "แต่ยังไม่พบว่าปลุกกันในระยะเวลาใกล้เคียง"
+                )
+
+        return SleepSummaryAnalysis(
+            sleep_quality=quality,
+            headline_th=headline,
+            summary_th=summary,
+            key_patterns_th=patterns,
+            twins_insight_th=twins_insight,
+            recommendations_th=recs,
         )
 

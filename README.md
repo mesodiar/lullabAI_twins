@@ -25,22 +25,28 @@ The Edge monitor detects events and sends the initial alert immediately. When GC
 - **ภาพสด** ใช้ go2rtc โดยหน้าเว็บลอง WebRTC ก่อน แล้วสลับไป MSE หรือ MJPEG เมื่อจำเป็น
 - **การตรวจจับ** ใช้ภาพและเสียงจากกล้องที่ Edge โมเดล YAMNet ประมวลผลเสียงบนเครื่องและแจ้งเตือนเมื่อพบเสียงคล้ายเด็กร้องไห้หรือเสียงสุนัข เช่น เห่าหรือคราง
 - **ประวัติ** บันทึก JSON ลงโฟลเดอร์ `edge/local_events/` และกู้คืนได้หลังรีสตาร์ต หน้าเว็บแสดง 3 รายการล่าสุดต่อเตียง กด **See more** เพื่อดูเพิ่มได้สูงสุด 15 รายการต่อเตียง
-- **คลิป** บันทึกภาพจากบัฟเฟอร์ก่อนและหลังเหตุการณ์ลง `edge/local_events/media/` คลิปแจ้งเตือนเสียงรายการใหม่จะมีเสียงจากไมค์เมื่อกล้องส่งเสียงได้ ไฟล์ยังเก็บไว้หลังรีสตาร์ตและโหมดนี้ไม่มีการลบอัตโนมัติ
+- **คลิป** บันทึกภาพจากบัฟเฟอร์ก่อนและหลังเหตุการณ์ลง `edge/local_events/media/` คลิปแจ้งเตือนเสียงรายการใหม่จะมีเสียงจากไมค์เมื่อกล้องส่งเสียงได้ ตั้งระยะเวลาเก็บวิดีโอได้จาก **Settings → Video retention**
 - **แจ้งเตือน** เปิดรับแจ้งเตือนขณะหน้าเว็บเปิดได้บน `localhost` หรือ HTTPS เมื่อเปิด Web Push ตามขั้นตอนด้านล่าง Edge จะส่งแจ้งเตือนไปยังมือถือที่สมัครไว้ได้แม้ปิดหน้าเว็บ
 - เปิดโหมดนี้โดยใช้ `docker-compose.yml` ตามปกติ
 
+## Local video retention
+
+Open **Settings → Video retention** from the dashboard on HTTPS or localhost. Choose **1, 3, 7, 14, 30, or 90 days**, enter the Edge setup code from `WEB_PUSH_SETUP_CODE`, and select **Apply and delete expired videos**. The default is **Keep forever**. The setting applies to both beds and persists across restarts.
+
+Edge checks local videos at startup, after a setting change, and hourly. Enabling retention can permanently delete videos already older than the selected limit. Event history and snapshots stay available. Cloud copies follow the existing GCP retention policy.
+
 ## Enable GCP reviews on Linux
 
-The deployment script defaults to project `lullabai-twins`, deployment account `mils.neon@gmail.com`, and region `asia-southeast1` for Cloud Storage, Firestore, and Cloud Run. Gemini uses the Vertex AI global endpoint.
+The deployment script defaults to project `twins-monitor`, deployment account `mils.burasakorn@gmail.com`, and region `asia-southeast1` for Cloud Storage, Firestore, and Cloud Run. Gemini uses the Vertex AI global endpoint.
 
 1. Deploy or update the cloud resources from the repository root. The project must have billing enabled.
 
    ```bash
-   gcloud auth login mils.neon@gmail.com --no-activate
+   gcloud auth login mils.burasakorn@gmail.com --no-activate
    bash cloud/infra/setup_gcp.sh
    ```
 
-2. Supply Application Default Credentials for `lullabai-edge@lullabai-twins.iam.gserviceaccount.com` on the Linux Edge host. For an interactive setup, the deployment account can create impersonated ADC without a service-account key. Sign in as `mils.neon@gmail.com` in the Google window.
+2. Supply Application Default Credentials for `lullabai-edge@twins-monitor.iam.gserviceaccount.com` on the Linux Edge host. For an interactive setup, the deployment account can create impersonated ADC without a service-account key. Sign in as `mils.burasakorn@gmail.com` in the Google window.
 
    ```bash
    cd edge
@@ -51,7 +57,7 @@ The deployment script defaults to project `lullabai-twins`, deployment account `
      trap 'rm -rf "$CLOUDSDK_CONFIG"' EXIT
      gcloud auth application-default login \
        --disable-quota-project \
-       --impersonate-service-account=lullabai-edge@lullabai-twins.iam.gserviceaccount.com
+       --impersonate-service-account=lullabai-edge@twins-monitor.iam.gserviceaccount.com
      cp "$CLOUDSDK_CONFIG/application_default_credentials.json" cloud-secrets/adc.json
    )
    ```
@@ -92,7 +98,24 @@ npm run dev
 
 ## Deploy บน Linux และเปิด Web Push
 
-Edge ส่งแจ้งเตือนผ่าน Web Push ไปยังเบราว์เซอร์ที่สมัครไว้ ส่วนภาพและคลิปอยู่บนเครื่อง Linux ข้อความแจ้งเตือนมีชื่อเหตุการณ์และเตียงที่ตรวจพบ Edge เก็บข้อมูลสมัครรับบนดิสก์ใน `edge/local_events/push_subscriptions.sqlite3`
+Edge ส่งแจ้งเตือนผ่าน Web Push ไปยังเบราว์เซอร์ที่สมัครไว้ ส่วนภาพและคลิปอยู่บนเครื่อง Linux ข้อความแจ้งเตือนมีชื่อเหตุการณ์และเตียงที่ตรวจพบ (เมื่อเปิด **GCP review** ระบบจะรอให้ Vertex AI Gemini ยืนยันเหตุการณ์ก่อนส่งแจ้งเตือน และกรองเสียงร้อง/การขยับตัวให้ต่อเนื่องอย่างน้อย 10 วินาทีก่อนส่งขึ้น Vertex AI ส่วนเหตุการณ์ความปลอดภัยเช่นพลิกคว่ำ/ผ้าปิดหน้าจะส่งทันที) Edge เก็บข้อมูลสมัครรับบนดิสก์ใน `edge/local_events/push_subscriptions.sqlite3`
+
+### วิธี Deploy อัตโนมัติด้วยสคริปต์ (แนะนำ)
+
+ตั้งค่า `edge/.env` ให้เรียบร้อยก่อน (รวมถึง `LULLABAI_BIND_ADDRESS=127.0.0.1`, `WEB_PUSH_SUBJECT`, `WEB_PUSH_SETUP_CODE`) แล้วรันจากรากโปรเจกต์:
+
+```bash
+# Deploy ทั้ง Edge (ตรวจหา edge/cloud-secrets/adc.json อัตโนมัติ) + บิลด์หน้าเว็บไปที่ /srv/lullabai
+bash edge/deploy_linux.sh --web-dir /srv/lullabai
+
+# ตัวเลือกเพิ่มเติม:
+# bash edge/deploy_linux.sh --pull --gcp --web-dir /srv/lullabai   # ดึงโค้ดล่าสุด + บังคับโหมด GCP
+# bash edge/deploy_linux.sh --local --skip-web                     # รันเฉพาะ Edge แบบ Local
+```
+
+สคริปต์จะสร้าง `edge/push-secrets/vapid.pem` อัตโนมัติเฉพาะครั้งแรก (ไม่ทับไฟล์เดิมเพื่อให้มือถือที่สมัครไว้รับแจ้งเตือนต่อได้), สตาร์ต Docker Compose, บิลด์ `web/dist/` และตรวจสอบ `/health` ให้ครบจบในคำสั่งเดียว
+
+### ขั้นตอนแบบ Manual และตัวอย่าง Caddy Reverse Proxy
 
 1. สร้างคีย์ VAPID และรหัสสมัครรับแจ้งเตือนจากโฟลเดอร์ `edge/` สร้างคีย์ครั้งแรกแล้วใช้ไฟล์เดิมหลังรีสตาร์ตหรืออัปเดต เพื่อให้มือถือที่สมัครไว้รับแจ้งเตือนได้ต่อ
 

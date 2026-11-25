@@ -22,7 +22,16 @@ export function alertTitle(event: LullabAIEvent) {
 export function isImportantAlert(event: LullabAIEvent) {
   return event.trigger_type !== "PERIODIC_CHECK" &&
     event.status !== "FALSE_ALARM_SUPPRESSED" &&
-    (event.cloud_review === "REVIEWED" || !event.ai_analysis?.is_false_alarm);
+    !event.ai_analysis?.is_false_alarm;
+}
+
+export function shouldNotifyLocal(event: LullabAIEvent, cloudReviewsEnabled: boolean) {
+  if (event.simulated) return true;
+  if (!isImportantAlert(event)) return false;
+  if (!cloudReviewsEnabled) return true;
+  const ai = event.ai_analysis;
+  if (event.cloud_review !== "REVIEWED" || !ai) return false;
+  return ai.safety_alert || ai.urgency !== "LOW";
 }
 
 export async function requestLocalNotifications() {
@@ -45,8 +54,12 @@ export async function requestLocalNotifications() {
 export async function notifyLocal(event: LullabAIEvent, bedLabel: string) {
   if (!("Notification" in window) || Notification.permission !== "granted") return;
 
-  const title = event.simulated ? `Test · ${alertTitle(event)}` : alertTitle(event);
-  const options = { body: bedLabel, tag: event.event_id };
+  const ai = event.ai_analysis;
+  const title = event.simulated
+    ? `Test · ${alertTitle(event)}`
+    : ai?.title_th || alertTitle(event);
+  const body = ai?.recommended_action_th ? `${bedLabel} · ${ai.recommended_action_th}` : bedLabel;
+  const options = { body, tag: event.event_id };
   try {
     const registration = await navigator.serviceWorker?.getRegistration();
     if (registration?.active) {

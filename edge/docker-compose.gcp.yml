@@ -2,9 +2,9 @@ services:
   edge-detector:
     environment:
       LULLABAI_GCP_ENABLED: "1"
-      GCP_PROJECT_ID: "${GCP_PROJECT_ID:-lullabai-twins}"
+      GCP_PROJECT_ID: "${GCP_PROJECT_ID:-twins-monitor}"
       GCP_FIRESTORE_DATABASE: "${GCP_FIRESTORE_DATABASE:-lullabai-events}"
-      GCS_EVENTS_BUCKET: "${GCS_EVENTS_BUCKET:-lullabai-twins-lullabai-events}"
+      GCS_EVENTS_BUCKET: "${GCS_EVENTS_BUCKET:-twins-monitor-lullabai-events}"
       GOOGLE_APPLICATION_CREDENTIALS: /run/lullabai-cloud/adc.json
     volumes:
       - type: bind

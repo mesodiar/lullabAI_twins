@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from prompts import SafetyAndSleepAnalysis
+from prompts import SafetyAndSleepAnalysis, SleepSummaryAnalysis
 
 
 class CloudNotifier:
@@ -63,3 +63,32 @@ class CloudNotifier:
         elif analysis.urgency == "HIGH":
             safety_status = "WARNING"
         return {"event_id": event_id, "baby_id": baby_id, "safety_status": safety_status, **update}
+
+    def load_sleep_summary(self, summary_id: str) -> dict[str, Any] | None:
+        if self._firestore_client is not None:
+            return self._firestore_client.collection("sleep_summaries").document(summary_id).get(timeout=10).to_dict()
+        if self.local_events_dir:
+            local_file = self.local_events_dir / f"{summary_id}.json"
+            if local_file.exists():
+                return json.loads(local_file.read_text(encoding="utf-8"))
+        return None
+
+    def finalize_sleep_summary(
+        self,
+        summary_id: str,
+        analysis: SleepSummaryAnalysis,
+    ) -> dict[str, Any]:
+        update = {
+            "status": "COMPLETED",
+            "analyzed_at": datetime.now(timezone.utc).isoformat(),
+            "ai_summary": analysis.to_dict(),
+        }
+        if self._firestore_client is not None:
+            self._firestore_client.collection("sleep_summaries").document(summary_id).update(update, timeout=10)
+        elif self.local_events_dir:
+            local_file = self.local_events_dir / f"{summary_id}.json"
+            if local_file.exists():
+                existing = json.loads(local_file.read_text(encoding="utf-8"))
+                existing.update(update)
+                local_file.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"summary_id": summary_id, **update}

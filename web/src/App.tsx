@@ -7,7 +7,8 @@ import { VideoRetentionSettings } from "./components/VideoRetentionSettings";
 import { EventFeed } from "./components/EventFeed";
 import { LivePlayer } from "./components/LivePlayer";
 import { SafetyBanner } from "./components/SafetyBanner";
-import { isImportantAlert, notifyLocal, requestLocalNotifications } from "./localAlerts";
+import { SleepSummary } from "./components/SleepSummary";
+import { isImportantAlert, notifyLocal, requestLocalNotifications, shouldNotifyLocal } from "./localAlerts";
 import type { BabyProfile, EdgeMetrics, LullabAIEvent } from "./lib/types";
 
 const LOCAL_HOST = window.location.hostname;
@@ -128,7 +129,7 @@ export function App() {
   useEffect(() => {
     const controller = new AbortController();
     let polling = false;
-    let seenEventIds: Set<string> | null = null;
+    let notifiedEventIds: Set<string> | null = null;
 
     const updateBabies = (snapshot?: EdgeStatus["babies"]) => {
       const now = Date.now();
@@ -188,15 +189,21 @@ export function App() {
         } : null);
         if (Array.isArray(data?.recent_events)) {
           const received = data.recent_events.filter((event) => event?.event_id && event.trigger_type !== "PERIODIC_CHECK");
-          const nextEventIds = new Set(received.map((event) => event.event_id));
-          if (seenEventIds) {
+          const cloudEnabled = data?.cloud_reviews_enabled === true;
+          if (notifiedEventIds === null) {
+            notifiedEventIds = new Set(
+              received.filter((event) => shouldNotifyLocal(event, cloudEnabled)).map((event) => event.event_id)
+            );
+          } else {
             for (const event of received) {
-              if (!hasBackgroundPush.current && !seenEventIds.has(event.event_id) && isImportantAlert(event)) {
-                void notifyLocal(event, BED_LABELS[event.baby_id as BedId] ?? event.baby_id);
+              if (!notifiedEventIds.has(event.event_id) && shouldNotifyLocal(event, cloudEnabled)) {
+                notifiedEventIds.add(event.event_id);
+                if (!hasBackgroundPush.current) {
+                  void notifyLocal(event, BED_LABELS[event.baby_id as BedId] ?? event.baby_id);
+                }
               }
             }
           }
-          seenEventIds = nextEventIds;
           if (!received.length) return;
           setEvents((previous) => {
             const byId = new Map(previous.map((event) => [event.event_id, event]));
@@ -452,6 +459,12 @@ export function App() {
           </details>
         </LivePlayer>
         <EventFeed key={`history-${selectedBabyId}`} edgeBaseUrl={EDGE_BASE_URL} events={events.filter((event) => event.baby_id === selectedBabyId)} />
+        <SleepSummary
+          babyId={selectedBabyId}
+          bedLabel={BED_LABELS[selectedBabyId]}
+          edgeBaseUrl={EDGE_BASE_URL}
+          cloudReviewsEnabled={cloudReview?.enabled === true}
+        />
       </main>
       <dialog
         className="cry-test-dialog"

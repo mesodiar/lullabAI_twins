@@ -2,8 +2,8 @@
 # Provision the private Cloud Storage → Eventarc → Cloud Run review pipeline.
 set -euo pipefail
 
-PROJECT_ID="${GCP_PROJECT_ID:-lullabai-twins}"
-ACCOUNT="${GCP_ACCOUNT:-mils.neon@gmail.com}"
+PROJECT_ID="${GCP_PROJECT_ID:-twins-monitor}"
+ACCOUNT="${GCP_ACCOUNT:-mils.burasakorn@gmail.com}"
 REGION="${GCP_LOCATION:-asia-southeast1}"
 DATABASE="${GCP_FIRESTORE_DATABASE:-lullabai-events}"
 BUCKET="${GCS_EVENTS_BUCKET:-${PROJECT_ID}-lullabai-events}"

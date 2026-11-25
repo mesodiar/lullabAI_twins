@@ -168,3 +168,58 @@ def test_pet_cover_warning_remains_unconfirmed_without_video_analysis(tmp_path: 
     assert result["ai_analysis"]["face_covered"] is False
     assert "สงสัยว่าผ้าปิดหน้าน้องหมา" in result["ai_analysis"]["title_th"]
 
+
+def test_sleep_summary_cloudevent_and_local_fallback(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("GCS_EVENTS_BUCKET", "private-qa")
+    analyzer = GeminiSleepAnalyzer(project_id="")
+    notifier = Mock(spec=CloudNotifier)
+    svc = System2AnalyzerService(analyzer=analyzer, notifier=notifier)
+
+    summary_id = "sum_1795478954_ab12cd"
+    path = f"summaries/{summary_id}.json"
+    payload = {
+        "baby_id": "baby_1",
+        "window_hours": 24,
+        "subject_mode": "BABY",
+        "stats": {
+            "total_events": 3,
+            "cry_count": 2,
+            "dog_vocalization_count": 0,
+            "motion_count": 1,
+            "safety_alert_count": 0,
+            "longest_quiet_minutes": 245,
+            "cross_bed_wakeups": 1,
+        },
+        "other_bed": {"baby_id": "baby_2", "total_events": 2, "disturbance_count": 1},
+        "compact_timeline": [],
+    }
+    notifier.load_sleep_summary.return_value = {
+        "summary_id": summary_id,
+        "status": "PENDING_AI",
+        "gcs_uri": f"gs://private-qa/{path}",
+        "payload": payload,
+    }
+    notifier.finalize_sleep_summary.side_effect = lambda sid, analysis: {
+        "summary_id": sid,
+        "status": "COMPLETED",
+        "ai_summary": analysis.to_dict(),
+    }
+
+    res = svc.handle_gcs_cloudevent({
+        "bucket": "private-qa",
+        "name": path,
+        "metadata": {"summary_id": summary_id},
+    })
+    assert res["status"] == "COMPLETED"
+    assert res["ai_summary"]["sleep_quality"] == "FAIR"
+    assert res["ai_summary"]["twins_insight_th"] is not None
+    assert "2 เตียง" in res["ai_summary"]["twins_insight_th"]
+
+    notifier.load_sleep_summary.return_value["status"] = "COMPLETED"
+    assert svc.handle_gcs_cloudevent({
+        "bucket": "private-qa",
+        "name": path,
+        "metadata": {"summary_id": summary_id},
+    })["status"] == "already_summarized"
+
+

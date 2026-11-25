@@ -5,8 +5,10 @@ from __future__ import annotations
 import importlib.util
 import json
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 import sys
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -175,6 +177,50 @@ def test_idle_edge_does_not_emit_periodic_events_with_legacy_config(monkeypatch)
 
     pipeline._latest_audio = edge_main.AudioDetectionResult(0.9, "Baby cry", 0.1, True)
     assert pipeline.step_once(empty)["triggered"] == "CRY"
+
+
+def test_video_retention_expires_only_old_managed_videos(tmp_path: Path) -> None:
+    store = LocalEventStore(tmp_path)
+    store.media_dir.mkdir()
+    event_id = "evt_123_abcdef"
+    paths = [store.media_dir / name for name in (
+        f"{event_id}.mp4", f"{event_id}_thumb.jpg", "evt_456_abcd01.mp4", "manual.mp4",
+    )]
+    old_video, snapshot, new_video, manual_video = paths
+    for path in paths:
+        path.write_bytes(b"fixture")
+    old_time = time.time() - 8 * 86400
+    for path in (old_video, snapshot, manual_video):
+        os.utime(path, (old_time, old_time))
+    link = store.media_dir / "evt_789_abcdef.mp4"
+    link.symlink_to(manual_video)
+
+    event = {
+        "event_id": event_id,
+        "media": {
+            "local_video_path": f"/media/{old_video.name}",
+            "local_video_has_audio": True,
+            "local_snapshot_path": f"/media/{snapshot.name}",
+        },
+    }
+    store.save(event)
+    store.prune_videos()
+    assert old_video.exists()
+
+    store.set_video_retention(7)
+    restarted = LocalEventStore(tmp_path)
+    assert restarted.video_retention_days == 7
+    restarted.prune_videos()
+    assert not old_video.exists()
+    assert all(path.exists() for path in (snapshot, new_video, manual_video, link))
+    displayed = restarted.with_available_video(event)
+    assert displayed["media"] == {
+        "local_snapshot_path": f"/media/{snapshot.name}",
+        "local_video_unavailable": True,
+    }
+    assert restarted.load(event_id) == event
+    restarted.set_video_retention(None)
+    assert LocalEventStore(tmp_path).video_retention_days is None
 
 
 def test_local_trigger_persists_history_and_snapshot_without_cloud(tmp_path, monkeypatch) -> None:
@@ -438,3 +484,219 @@ def test_motion_detector_roi() -> None:
         if res.motion_triggered:
             triggered_any = True
     assert triggered_any is True
+
+
+def test_sleep_summary_digest_and_cross_bed_correlation(tmp_path: Path) -> None:
+    from datetime import datetime, timedelta, timezone
+    from local_events import LocalEventStore
+    from sleep_summary import SleepSummaryStore
+
+    store = LocalEventStore(tmp_path)
+    summary_store = SleepSummaryStore(store)
+    now = datetime(2026, 11, 24, 7, 0, tzinfo=timezone.utc)
+
+    def write_evt(offset_min: int, baby_id: str, trigger: str, **extra_metrics) -> None:
+        created = now - timedelta(minutes=offset_min)
+        evt_id = f"evt_{int(created.timestamp())}_{abs(offset_min):06x}"
+        store.save({
+            "event_id": evt_id,
+            "baby_id": baby_id,
+            "camera_id": f"cam_{baby_id}",
+            "subject_mode": "BABY",
+            "trigger_type": trigger,
+            "status": "EDGE_DETECTED",
+            "created_at": created.isoformat(),
+            "analyzed_at": None,
+            "edge_metrics": {"motion_score": 1.0, **extra_metrics},
+            "media": {},
+            "ai_analysis": None,
+        })
+
+    write_evt(480, "baby_1", "CRY", audio_kind="BABY_CRY")
+    write_evt(477, "baby_2", "CRY", audio_kind="BABY_CRY")
+    write_evt(120, "baby_1", "BAND_ROLLOVER", face_cover_suspected=True)
+    write_evt(60, "baby_1", "MOTION")
+
+    digest = summary_store.build_digest("baby_1", window_hours=24, now=now)
+    stats = digest["stats"]
+    assert stats["total_events"] == 3
+    assert stats["cry_count"] == 1
+    assert stats["safety_alert_count"] == 1
+    assert stats["motion_count"] == 1
+    assert stats["longest_quiet_minutes"] == 960
+    assert stats["cross_bed_wakeups"] == 1
+    assert digest["other_bed"]["total_events"] == 1
+    assert len(digest["hourly_activity"]) == 24
+    assert digest["local_summary"]["sleep_quality"] == "RESTLESS"
+
+
+def test_sleep_summary_cloud_sync_roundtrip(tmp_path: Path) -> None:
+    from unittest.mock import MagicMock
+    from cloud_sync import CloudSyncClient
+    from local_events import LocalEventStore
+    from sleep_summary import SleepSummaryStore
+
+    store = LocalEventStore(tmp_path)
+    firestore = MagicMock()
+    bucket = MagicMock()
+    bucket.name = "test-bucket"
+    doc_ref = firestore.collection.return_value.document.return_value
+    doc_ref.get.return_value.to_dict.return_value = {
+        "status": "COMPLETED",
+        "analyzed_at": "2026-11-24T07:05:00+00:00",
+        "ai_summary": {
+            "sleep_quality": "RESTFUL",
+            "headline_th": "คืนนี้หลับสบายดีมาก",
+            "summary_th": "ไม่มีเสียงร้องหรือแจ้งเตือนความปลอดภัย",
+            "key_patterns_th": ["หลับต่อเนื่องยาวนาน"],
+            "twins_insight_th": None,
+            "recommendations_th": ["รักษาตารางนอนเดิมต่อไป"],
+        },
+    }
+
+    cloud = CloudSyncClient(store, firestore, bucket)
+    cloud.set_enabled(True)
+    summary_store = SleepSummaryStore(store)
+    req = summary_store.create_request("baby_1", 24)
+    pending = cloud.enqueue_sleep_summary(req)
+    assert pending["status"] == "PENDING_AI"
+
+    marker = cloud.queue / pending["summary_id"]
+    assert marker.exists()
+    cloud._sync_summary(marker)
+
+    assert not marker.exists()
+    saved = summary_store.load_saved("baby_1", 24)
+    assert saved is not None
+    assert saved["status"] == "COMPLETED"
+    assert saved["ai_summary"]["headline_th"] == "คืนนี้หลับสบายดีมาก"
+
+
+def test_sustained_gate_skips_brief_cry_and_motion_but_escalates_after_10s(tmp_path: Path) -> None:
+    from unittest.mock import MagicMock
+    from audio_cry import AudioDetectionResult
+    from breathing_band import BandTrackingResult
+    from local_events import LocalEventStore
+    from main import BabyMonitorPipeline
+    from motion import MotionResult
+
+    store = LocalEventStore(tmp_path)
+    cloud_sync = MagicMock()
+    pipeline = BabyMonitorPipeline(
+        {"baby_id": "baby_1", "camera_id": "cam_1", "video_source_url": "http://example.invalid"},
+        {"post_roll_seconds": 0.0, "cloud_review_min_duration_seconds": {"CRY": 10.0, "MOTION": 10.0, "BAND_ROLLOVER": 0.0}},
+        store,
+        cloud_sync=cloud_sync,
+    )
+    frame = np.zeros((64, 64, 3), dtype=np.uint8)
+    pipeline.reader.get_buffered_frames = MagicMock(return_value=[(1.0, frame)])
+
+    pet_band = BandTrackingResult(
+        band_detected=True,
+        band_confidence=0.9,
+        band_bbox=[10, 10, 20, 20],
+        marker_count=0,
+        breathing_rpm=None,
+        rollover_suspected=False,
+        breathing_anomaly=False,
+        displacement_signal=0.0,
+        subject_type="PET",
+    )
+    no_motion = MotionResult(0.5, False, (0, 0, 64, 64))
+    strong_motion = MotionResult(8.0, True, (0, 0, 64, 64))
+    dog_cry = AudioDetectionResult(0.8, "Dog", 0.1, True, "DOG_VOCALIZATION")
+    silence = AudioDetectionResult(0.0, "Silence", 0.0, False, None)
+
+    # 1. Brief dog bark (3s) -> local event saved, NOT sent to Vertex AI.
+    pipeline._update_sustained_signals(pet_band, no_motion, dog_cry, 100.0)
+    brief_evt = pipeline.handle_triggered_event("CRY", {"audio_kind": "DOG_VOCALIZATION"})
+    pipeline._update_sustained_signals(pet_band, no_motion, dog_cry, 103.0)
+    pipeline._update_sustained_signals(pet_band, no_motion, silence, 106.0)
+    assert brief_evt["media"]
+    cloud_sync.enqueue.assert_not_called()
+
+    # 2. Sustained dog bark (10.5s with a 1.5s breath pause) -> escalated once to Vertex AI.
+    pipeline._update_sustained_signals(pet_band, no_motion, dog_cry, 200.0)
+    sustained_evt = pipeline.handle_triggered_event("CRY", {"audio_kind": "DOG_VOCALIZATION"})
+    pipeline._update_sustained_signals(pet_band, no_motion, dog_cry, 202.0)
+    pipeline._update_sustained_signals(pet_band, no_motion, silence, 203.5)
+    pipeline._update_sustained_signals(pet_band, no_motion, dog_cry, 204.0)
+    pipeline._update_sustained_signals(pet_band, no_motion, dog_cry, 206.0)
+    pipeline._update_sustained_signals(pet_band, no_motion, dog_cry, 208.5)
+    cloud_sync.enqueue.assert_not_called()
+    pipeline._update_sustained_signals(pet_band, no_motion, dog_cry, 210.5)
+    assert cloud_sync.enqueue.call_count == 1
+    assert cloud_sync.enqueue.call_args[0][0]["event_id"] == sustained_evt["event_id"]
+    assert sustained_evt["edge_metrics"]["sustained_duration_s"] == 10.5
+
+    # 3. Sustained strong movement (10.2s) -> escalated once to Vertex AI.
+    cloud_sync.reset_mock()
+    pipeline._update_sustained_signals(pet_band, strong_motion, silence, 300.0)
+    motion_evt = pipeline.handle_triggered_event("MOTION", {"audio_kind": None})
+    for ts in (302.0, 304.0, 306.0, 308.0):
+        pipeline._update_sustained_signals(pet_band, strong_motion, silence, ts)
+    cloud_sync.enqueue.assert_not_called()
+    pipeline._update_sustained_signals(pet_band, strong_motion, silence, 310.2)
+    assert cloud_sync.enqueue.call_count == 1
+    assert cloud_sync.enqueue.call_args[0][0]["event_id"] == motion_evt["event_id"]
+
+    # 4. Safety alert (BAND_ROLLOVER) -> uploaded immediately without 10s wait.
+    cloud_sync.reset_mock()
+    pipeline.handle_triggered_event("BAND_ROLLOVER", {"face_cover_suspected": True})
+    assert cloud_sync.enqueue.call_count == 1
+
+
+def test_web_push_waits_for_vertex_ai_confirmation_when_gcp_enabled(tmp_path: Path) -> None:
+    from unittest.mock import MagicMock
+    from cloud_sync import CloudSyncClient, should_notify_for_ai_review
+    from local_events import LocalEventStore
+    from main import BabyMonitorPipeline
+
+    assert should_notify_for_ai_review("FALSE_ALARM_SUPPRESSED", {"is_false_alarm": True, "urgency": "HIGH"}) is False
+    assert should_notify_for_ai_review("ANALYZED", {"is_false_alarm": False, "safety_alert": False, "urgency": "LOW"}) is False
+    assert should_notify_for_ai_review("ANALYZED", {"is_false_alarm": False, "safety_alert": False, "urgency": "HIGH"}) is True
+    assert should_notify_for_ai_review("ANALYZED", {"is_false_alarm": False, "safety_alert": True, "urgency": "LOW"}) is True
+
+    store = LocalEventStore(tmp_path)
+    web_push = MagicMock()
+    firestore = MagicMock()
+    bucket = MagicMock()
+    bucket.name = "test-bucket"
+    cloud = CloudSyncClient(store, firestore, bucket, web_push=web_push)
+    cloud.set_enabled(True)
+
+    pipeline = BabyMonitorPipeline(
+        {"baby_id": "baby_1", "camera_id": "cam_1", "video_source_url": "http://example.invalid"},
+        {"post_roll_seconds": 0.0},
+        store,
+        web_push=web_push,
+        cloud_sync=cloud,
+    )
+    frame = np.zeros((64, 64, 3), dtype=np.uint8)
+    pipeline.reader.get_buffered_frames = MagicMock(return_value=[(1.0, frame)])
+
+    # Trigger safety alert with GCP enabled -> Web Push must NOT fire before Gemini reviews.
+    evt = pipeline.handle_triggered_event("BAND_ROLLOVER", {"face_cover_suspected": True})
+    web_push.submit.assert_not_called()
+
+    # Simulate Vertex AI returning a confirmed HIGH urgency review -> Web Push fires once.
+    doc_ref = firestore.collection.return_value.document.return_value
+    doc_ref.get.return_value.to_dict.return_value = {
+        "status": "ANALYZED",
+        "analyzed_at": "2026-11-25T10:00:00+00:00",
+        "ai_analysis": {
+            "is_false_alarm": False,
+            "safety_alert": True,
+            "urgency": "CRITICAL",
+            "title_th": "ตรวจพบผ้าปิดหน้า",
+            "recommended_action_th": "เข้าไปตรวจดูทันที",
+        },
+    }
+    marker = cloud.queue / evt["event_id"]
+    assert marker.exists()
+    cloud._sync(marker)
+    assert web_push.submit.call_count == 1
+    assert web_push.submit.call_args[0][0]["ai_analysis"]["title_th"] == "ตรวจพบผ้าปิดหน้า"
+
+
+
