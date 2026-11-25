@@ -1,5 +1,5 @@
 import { Maximize, Minimize, VideoOff, Volume2, VolumeX } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type { BabyProfile } from "../lib/types";
 import { connectGo2RTCStream, type StreamProtocol } from "../lib/webrtc";
 
@@ -78,7 +78,7 @@ export function LivePlayer({
   const connectionDetail = connection === "Online" ? (imageMode ? "MJPEG" : protocol) : connection;
   useEffect(() => onConnectionChange(connectionDetail), [connectionDetail, onConnectionChange]);
 
-  const nextImageSource = () => {
+  const nextImageSource = useCallback(() => {
     setReady(false);
     const next: Record<ImageSource, ImageSource> = {
       EDGE_CAM: "GO2RTC",
@@ -87,8 +87,14 @@ export function LivePlayer({
       STATIC: "UNAVAILABLE",
       UNAVAILABLE: "UNAVAILABLE",
     };
-    setImageSource(next[imageSource]);
-  };
+    setImageSource((current) => current === imageSource ? next[current] : current);
+  }, [baby.baby_id, imageSource]);
+
+  useEffect(() => {
+    if (!imageMode || unavailable || ready) return;
+    const timer = window.setTimeout(nextImageSource, 6000);
+    return () => window.clearTimeout(timer);
+  }, [imageMode, imageUrl, nextImageSource, ready, unavailable]);
 
   const detectionBox = showDetection && ready && !usingSample && !unavailable ? baby.band_bbox_pct : null;
   const hasAudio = ready && !imageMode && !unavailable;

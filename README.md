@@ -22,7 +22,7 @@ The Edge monitor detects events and sends the initial alert immediately. When GC
 
 ![Tapo streams live video through go2rtc to the dashboard. The Edge Detector processes video and audio, saves events and clips locally, and sends event updates to the dashboard for browser notifications.](edge/assets/architecture/Architect-wo-gcp.png)
 
-- **ภาพสด** ใช้ go2rtc โดยหน้าเว็บลอง WebRTC ก่อน แล้วสลับไป MSE หรือ MJPEG เมื่อจำเป็น
+- **ภาพสด** ใช้ go2rtc: บน LAN แบบ HTTP ลอง WebRTC ก่อน ส่วน HTTPS ที่ใช้ proxy โดเมนเดียวกันลอง MSE ผ่าน WebSocket ก่อน แล้วใช้ MJPEG หากเล่นวิดีโอไม่ได้
 - **การตรวจจับ** ใช้ภาพและเสียงจากกล้องที่ Edge โมเดล YAMNet ประมวลผลเสียงบนเครื่องและแจ้งเตือนเมื่อพบเสียงคล้ายเด็กร้องไห้หรือเสียงสุนัข เช่น เห่าหรือคราง
 - **ประวัติ** บันทึก JSON ลงโฟลเดอร์ `edge/local_events/` และกู้คืนได้หลังรีสตาร์ต หน้าเว็บแสดง 3 รายการล่าสุดต่อเตียง กด **See more** เพื่อดูเพิ่มได้สูงสุด 15 รายการต่อเตียง
 - **คลิป** บันทึกภาพจากบัฟเฟอร์ก่อนและหลังเหตุการณ์ลง `edge/local_events/media/` คลิปแจ้งเตือนเสียงรายการใหม่จะมีเสียงจากไมค์เมื่อกล้องส่งเสียงได้ ตั้งระยะเวลาเก็บวิดีโอได้จาก **Settings → Video retention**
@@ -94,7 +94,7 @@ npm run dev
 - Dashboard เปิดที่ `http://localhost:5173` บนเครื่อง Edge หรือ `http://<IP-เครื่อง-Edge>:5173` บนอุปกรณ์ในเครือข่ายเดียวกัน
 - go2rtc ใช้พอร์ต 1984 และ Edge API ใช้พอร์ต 8095 โดยดูสถานะได้ที่ `http://localhost:8095/status`
 - สามารถตั้ง URL เองด้วย `VITE_GO2RTC_URL`, `VITE_EDGE_BASE_URL`, `VITE_EDGE_STATUS_URL` และ `VITE_MOCK_CAMERA_URL`
-- Dashboard บน HTTPS ใช้ reverse proxy บนโดเมนเดียวกันที่ `/edge`, `/go2rtc` และ `/mock` ตามตัวอย่างด้านล่าง
+- Dashboard บน HTTPS ใช้ reverse proxy บนโดเมนเดียวกันที่ `/edge`, `/go2rtc` และ `/mock` ตามตัวอย่างด้านล่าง สำหรับ Cloudflare Tunnel ที่ชี้มาที่ Vite preview ให้ใช้ `web/vite.config.ts` ด้วย (มี proxy และ WebSocket สำหรับภาพสด) และคง Cloudflare Access ครอบคลุมทุกเส้นทาง
 
 ## Deploy บน Linux และเปิด Web Push
 
