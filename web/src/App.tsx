@@ -1,6 +1,6 @@
 import { Bell, ChevronDown, MoonStar, Settings } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { disableBackgroundPush, enableBackgroundPush, prepareBackgroundPush, type BackgroundPushSetup } from "./backgroundPush";
+import { disableBackgroundPush, enableBackgroundPush, prepareBackgroundPush, sendTestBackgroundPush, type BackgroundPushSetup } from "./backgroundPush";
 import "./dashboard.css";
 import { CloudReviewSettings, type CloudReviewStatus } from "./components/CloudReviewSettings";
 import { VideoRetentionSettings } from "./components/VideoRetentionSettings";
@@ -261,6 +261,60 @@ export function App() {
     }
   };
 
+  const handleSendTestPush = async () => {
+    setChangingNotifications(true);
+    try {
+      if (backgroundPush && backgroundPush !== "unsupported" && backgroundPush.registered) {
+        await sendTestBackgroundPush(backgroundPush, selectedBabyId);
+        setNotificationStatus("Test alert sent to enrolled devices.");
+      } else if ("Notification" in window && Notification.permission === "granted") {
+        const shown = await notifyLocal({
+          event_id: `test_local_${Date.now()}`,
+          baby_id: selectedBabyId,
+          camera_id: activeBaby.camera_id,
+          subject_mode: activeBaby.subject_mode,
+          trigger_type: "CRY",
+          status: "ANALYZED",
+          cloud_review: "REVIEWED",
+          created_at: new Date().toISOString(),
+          analyzed_at: new Date().toISOString(),
+          edge_metrics: {
+            yamnet_cry_prob: 0.9,
+            yamnet_top_label: "Crying",
+            motion_score: 0,
+            band_detected: true,
+            band_confidence: 0.9,
+            breathing_rpm: null,
+            band_bbox: null,
+          },
+          ai_analysis: {
+            is_false_alarm: false,
+            safety_alert: false,
+            posture: "SUPINE",
+            face_covered: false,
+            band_visible_and_secure: true,
+            sleep_state: "CRYING",
+            urgency: "HIGH",
+            title_th: "ทดสอบแจ้งเตือนจาก Vertex AI",
+            reason_hypothesis_th: "ทดสอบการแจ้งเตือนเมื่อเหตุการณ์ผ่านการยืนยันจาก GCP",
+            recommended_action_th: "ระบบแจ้งเตือนพร้อมใช้งาน",
+          },
+        }, BED_LABELS[selectedBabyId]);
+        setNotificationStatus(
+          shown
+            ? "Test alert sent. If no banner appeared, check macOS/OS notification settings and Focus mode."
+            : "Browser blocked the test notification."
+        );
+      } else {
+        setNotificationStatus("Enable notifications first.");
+      }
+    } catch (error) {
+      setNotificationStatus(error instanceof Error ? error.message : "Could not send a test notification.");
+    } finally {
+      setChangingNotifications(false);
+    }
+  };
+
   const toggleSubjectMode = () => {
     setBabies((prev) => {
       const current = prev[selectedBabyId];
@@ -388,6 +442,17 @@ export function App() {
                     ? backgroundPush.registered ? "Turn off background alerts" : "Enable background alerts"
                     : "Enable notifications"}
                 </button>
+                {((backgroundPush && backgroundPush !== "unsupported" && backgroundPush.registered) ||
+                  ("Notification" in window && Notification.permission === "granted")) && (
+                  <button
+                    className="menu-button"
+                    type="button"
+                    onClick={handleSendTestPush}
+                    disabled={changingNotifications}
+                  >
+                    Send test alert
+                  </button>
+                )}
               </section>
             </details>
             <details className="app-menu" name="dashboard-menu">

@@ -59,3 +59,16 @@ export async function disableBackgroundPush(setup: BackgroundPushSetup): Promise
   }
   return { ...setup, subscription: null, registered: false };
 }
+
+export async function sendTestBackgroundPush(setup: BackgroundPushSetup, babyId: string): Promise<void> {
+  if (!setup.subscription) throw new Error("Enable background alerts on this device first.");
+  const response = await fetch("/push/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...setup.subscription.toJSON(), baby_id: babyId }),
+  });
+  const result = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(result?.error || "Could not send a test notification.");
+  }
+}

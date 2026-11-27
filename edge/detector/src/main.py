@@ -515,6 +515,11 @@ class EdgeStatusHandler(BaseHTTPRequestHandler):
                 service.enroll(fields)
             elif action == "remove":
                 service.remove(fields)
+            elif action == "test":
+                if not service.contains(fields):
+                    self._send_json(403, {"error": "This device is not enrolled for background alerts."})
+                    return
+                service.submit_test(str(body.get("baby_id") or "baby_1"))
             else:
                 self._send_json(200, {"registered": service.contains(fields)})
                 return
@@ -645,6 +650,8 @@ class EdgeStatusHandler(BaseHTTPRequestHandler):
             self._push_subscription("enroll")
         elif path == "/push/subscription-status":
             self._push_subscription("status")
+        elif path == "/push/test":
+            self._push_subscription("test")
         elif path == "/cloud-review":
             self._set_cloud_reviews()
         elif path == "/video-retention":

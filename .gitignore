@@ -21,7 +21,7 @@ lib/
 !/web/src/lib/webrtc.ts
 /edge/local_events/
 /edge/push-secrets/
-/edge/cloud-secrets/
+/edge/cloud-secrets/adc.json
 lib64/
 parts/
 sdist/

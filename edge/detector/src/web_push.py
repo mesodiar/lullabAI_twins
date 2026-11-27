@@ -168,6 +168,18 @@ class WebPushService:
         except Full:
             print("[WebPush] Delivery queue full; event remains available on the dashboard.")
 
+    def submit_test(self, baby_id: str = "baby_1") -> None:
+        bed = baby_id if baby_id in BEDS else "baby_1"
+        self.submit({
+            "event_id": f"test_push_{bed}",
+            "baby_id": bed,
+            "trigger_type": "CRY",
+            "ai_analysis": {
+                "title_th": "ทดสอบแจ้งเตือนจาก Vertex AI",
+                "recommended_action_th": "ระบบแจ้งเตือนผ่าน GCP พร้อมใช้งาน",
+            },
+        })
+
     def _run(self) -> None:
         while True:
             payload = self.pending.get()

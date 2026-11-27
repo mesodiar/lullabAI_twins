@@ -51,23 +51,28 @@ export async function requestLocalNotifications() {
   return "Notifications are on while this page is open.";
 }
 
-export async function notifyLocal(event: LullabAIEvent, bedLabel: string) {
-  if (!("Notification" in window) || Notification.permission !== "granted") return;
+export async function notifyLocal(event: LullabAIEvent, bedLabel: string): Promise<boolean> {
+  if (!("Notification" in window) || Notification.permission !== "granted") return false;
 
   const ai = event.ai_analysis;
   const title = event.simulated
     ? `Test · ${alertTitle(event)}`
     : ai?.title_th || alertTitle(event);
   const body = ai?.recommended_action_th ? `${bedLabel} · ${ai.recommended_action_th}` : bedLabel;
-  const options = { body, tag: event.event_id };
+  const options: NotificationOptions = { body, tag: event.event_id, icon: "/icon-192.png" };
   try {
     const registration = await navigator.serviceWorker?.getRegistration();
     if (registration?.active) {
       await registration.showNotification(title, options);
-    } else {
-      new Notification(title, options);
+      return true;
     }
   } catch {
-    // The event still appears in the dashboard when system notifications are unavailable.
+    // Fall back to the direct Notification constructor when service-worker display fails.
+  }
+  try {
+    new Notification(title, options);
+    return true;
+  } catch {
+    return false;
   }
 }
