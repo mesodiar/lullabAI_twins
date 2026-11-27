@@ -19,7 +19,14 @@ export function alertTitle(event: LullabAIEvent) {
   return isPetCoverAlert(event) ? "Possible blanket over dog's face" : TITLES[event.trigger_type];
 }
 
+// Temporary testing mode: notify on every Vertex AI review (including is_false_alarm=true / LOW urgency).
+// Set to false for production to notify only on confirmed MEDIUM/HIGH/CRITICAL or safety alerts.
+const NOTIFY_ALL_AI_REVIEWS = true;
+
 export function isImportantAlert(event: LullabAIEvent) {
+  if (NOTIFY_ALL_AI_REVIEWS && event.cloud_review === "REVIEWED" && event.ai_analysis) {
+    return event.trigger_type !== "PERIODIC_CHECK";
+  }
   return event.trigger_type !== "PERIODIC_CHECK" &&
     event.status !== "FALSE_ALARM_SUPPRESSED" &&
     !event.ai_analysis?.is_false_alarm;
@@ -31,6 +38,7 @@ export function shouldNotifyLocal(event: LullabAIEvent, cloudReviewsEnabled: boo
   if (!cloudReviewsEnabled) return true;
   const ai = event.ai_analysis;
   if (event.cloud_review !== "REVIEWED" || !ai) return false;
+  if (NOTIFY_ALL_AI_REVIEWS) return true;
   return ai.safety_alert || ai.urgency !== "LOW";
 }
 

@@ -22,10 +22,22 @@ class CloudReviewDisabled(Exception):
     """The event belongs to an earlier analysis mode."""
 
 
-def should_notify_for_ai_review(review_status: str | None, ai_analysis: dict[str, Any] | None) -> bool:
-    """Return True only when Vertex AI confirms an actionable, non-false-alarm event."""
+# Temporary testing mode: notify on every Vertex AI review (including is_false_alarm=True / LOW urgency).
+# Set to False for production to notify only on confirmed MEDIUM/HIGH/CRITICAL or safety alerts.
+NOTIFY_ALL_AI_REVIEWS = os.environ.get("LULLABAI_NOTIFY_ALL_AI_REVIEWS", "1") == "1"
+
+
+def should_notify_for_ai_review(
+    review_status: str | None,
+    ai_analysis: dict[str, Any] | None,
+    *,
+    include_all: bool = NOTIFY_ALL_AI_REVIEWS,
+) -> bool:
+    """Return True when Vertex AI review should trigger a parent notification."""
     if not isinstance(ai_analysis, dict):
         return False
+    if include_all:
+        return True
     if review_status == "FALSE_ALARM_SUPPRESSED" or ai_analysis.get("is_false_alarm") is True:
         return False
     if ai_analysis.get("safety_alert") is True:

@@ -652,10 +652,11 @@ def test_web_push_waits_for_vertex_ai_confirmation_when_gcp_enabled(tmp_path: Pa
     from local_events import LocalEventStore
     from main import BabyMonitorPipeline
 
-    assert should_notify_for_ai_review("FALSE_ALARM_SUPPRESSED", {"is_false_alarm": True, "urgency": "HIGH"}) is False
-    assert should_notify_for_ai_review("ANALYZED", {"is_false_alarm": False, "safety_alert": False, "urgency": "LOW"}) is False
-    assert should_notify_for_ai_review("ANALYZED", {"is_false_alarm": False, "safety_alert": False, "urgency": "HIGH"}) is True
-    assert should_notify_for_ai_review("ANALYZED", {"is_false_alarm": False, "safety_alert": True, "urgency": "LOW"}) is True
+    assert should_notify_for_ai_review("FALSE_ALARM_SUPPRESSED", {"is_false_alarm": True, "urgency": "HIGH"}, include_all=False) is False
+    assert should_notify_for_ai_review("ANALYZED", {"is_false_alarm": False, "safety_alert": False, "urgency": "LOW"}, include_all=False) is False
+    assert should_notify_for_ai_review("ANALYZED", {"is_false_alarm": False, "safety_alert": False, "urgency": "HIGH"}, include_all=False) is True
+    assert should_notify_for_ai_review("ANALYZED", {"is_false_alarm": False, "safety_alert": True, "urgency": "LOW"}, include_all=False) is True
+    assert should_notify_for_ai_review("FALSE_ALARM_SUPPRESSED", {"is_false_alarm": True, "urgency": "LOW"}, include_all=True) is True
 
     store = LocalEventStore(tmp_path)
     web_push = MagicMock()
